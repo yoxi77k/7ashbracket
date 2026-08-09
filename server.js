@@ -68,7 +68,7 @@ function requireOwner(req, res, next) {
 // restart) — the client just re-fetches /api/state, which reflects
 // whatever is currently on disk. No change needed for that part.
 function defaultState() {
-  return { players: [], teams: [], bracketGenerated: false, rounds: [], maxPlayers: null, matchFormat: 1 };
+  return { players: [], teams: [], bracketGenerated: false, rounds: [], maxPlayers: null, matchFormat: 1, registrationOpen: false };
 }
 
 function loadState() {
@@ -87,10 +87,24 @@ let state = loadState();
 if (state.maxPlayers === undefined) state.maxPlayers = null; // backward-compat with older save files
 if (!state.matchFormat) state.matchFormat = 1; // backward-compat: default to solo 1v1
 if (!Array.isArray(state.teams)) state.teams = []; // backward-compat with older save files
+if (state.registrationOpen === undefined) {
+  // Backward-compat: an already-running tournament (players/teams registered,
+  // or a bracket already generated) must not suddenly get locked out.
+  state.registrationOpen = state.bracketGenerated || state.players.length > 0 || state.teams.length > 0;
+}
 
 function totalRegisteredCount() {
   const format = state.matchFormat || 1;
   return format === 1 ? state.players.length : state.teams.reduce((sum, t) => sum + t.members.length, 0);
+}
+
+// Short, unambiguous code (no 0/O/1/I mix-ups) a team's creator shares with
+// teammates so they can join that specific team.
+function generateTeamCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let code = "";
+  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
 }
 
 // ---------- Discord OAuth2 ----------
@@ -176,7 +190,19 @@ app.get("/api/session", (req, res) => {
 
 // ---------- Tournament state ----------
 app.get("/api/state", (req, res) => {
-  res.json(state);
+  const myId = req.session.discordUser ? req.session.discordUser.id : null;
+  const isOwner = !!req.session.isOwner;
+
+  // A team's join code is only sent to its own members (or the owner) —
+  // everyone else gets the team without that field.
+  const sanitizedTeams = state.teams.map(t => {
+    const isMember = myId && t.members.some(m => m.discordId === myId);
+    if (isOwner || isMember) return t;
+    const { code, ...rest } = t;
+    return rest;
+  });
+
+  res.json({ ...state, teams: sanitizedTeams });
 });
 
 // ---------- Registration (solo, 1v1 mode only) ----------
@@ -186,6 +212,9 @@ app.post("/api/register", (req, res) => {
   }
   if ((state.matchFormat || 1) !== 1) {
     return res.status(400).json({ error: "Team mode is active — create or join a team instead." });
+  }
+  if (!state.registrationOpen) {
+    return res.status(400).json({ error: "Registration hasn't started yet." });
   }
   if (state.bracketGenerated) {
     return res.status(400).json({ error: "Registrations are closed." });
@@ -246,6 +275,9 @@ app.post("/api/teams/create", (req, res) => {
   if (format === 1) {
     return res.status(400).json({ error: "Solo mode is active — register directly instead." });
   }
+  if (!state.registrationOpen) {
+    return res.status(400).json({ error: "Registration hasn't started yet." });
+  }
   if (state.bracketGenerated) {
     return res.status(400).json({ error: "Registrations are closed." });
   }
@@ -263,9 +295,13 @@ app.post("/api/teams/create", (req, res) => {
     return res.status(400).json({ error: "Enter a team name." });
   }
 
+  let code;
+  do { code = generateTeamCode(); } while (state.teams.some(t => t.code === code));
+
   state.teams.push({
     id: crypto.randomUUID(),
     name,
+    code,
     members: [{
       id: crypto.randomUUID(),
       discordId: myId,
@@ -275,9 +311,10 @@ app.post("/api/teams/create", (req, res) => {
   });
 
   saveState();
-  res.json({ ok: true });
+  res.json({ ok: true, code });
 });
 
+// Join a team using the private code its creator shares (not by browsing a public list).
 app.post("/api/teams/join", (req, res) => {
   if (!req.session.discordUser) {
     return res.status(401).json({ error: "Log in with Discord first." });
@@ -285,6 +322,9 @@ app.post("/api/teams/join", (req, res) => {
   const format = state.matchFormat || 1;
   if (format === 1) {
     return res.status(400).json({ error: "Solo mode is active — register directly instead." });
+  }
+  if (!state.registrationOpen) {
+    return res.status(400).json({ error: "Registration hasn't started yet." });
   }
   if (state.bracketGenerated) {
     return res.status(400).json({ error: "Registrations are closed." });
@@ -298,10 +338,10 @@ app.post("/api/teams/join", (req, res) => {
     return res.status(400).json({ error: "You're already in a team." });
   }
 
-  const { teamId } = req.body || {};
-  const team = state.teams.find(t => t.id === teamId);
+  const code = String((req.body || {}).code || "").trim().toUpperCase();
+  const team = state.teams.find(t => t.code === code);
   if (!team) {
-    return res.status(404).json({ error: "Team not found." });
+    return res.status(404).json({ error: "Invalid team code." });
   }
   if (team.members.length >= format) {
     return res.status(400).json({ error: "This team is already full." });
@@ -371,27 +411,35 @@ app.post("/api/owner/set-max-players", requireOwner, (req, res) => {
 });
 
 // ---------- Owner: set the match format (1v1 / 2v2 / 3v3 / 4v4) ----------
-// Switching format changes what "registered" means (solo players vs teams),
-// so any existing registrations are cleared to avoid a mixed, invalid state.
+// Only allowed during setup, before registration has started.
 app.post("/api/owner/set-match-format", requireOwner, (req, res) => {
   if (state.bracketGenerated) {
     return res.status(400).json({ error: "Reset the bracket before changing the match format." });
+  }
+  if (state.registrationOpen) {
+    return res.status(400).json({ error: "Registration has already started — reset everything to change the format." });
   }
   const format = Number((req.body || {}).format);
   if (![1, 2, 3, 4].includes(format)) {
     return res.status(400).json({ error: "Format must be 1, 2, 3, or 4 (players per team)." });
   }
 
-  let reset = false;
-  if (format !== state.matchFormat) {
-    if (state.players.length > 0 || state.teams.length > 0) reset = true;
-    state.players = [];
-    state.teams = [];
-  }
-
   state.matchFormat = format;
   saveState();
-  res.json({ ok: true, matchFormat: format, reset });
+  res.json({ ok: true, matchFormat: format });
+});
+
+// ---------- Owner: open registration (locks in the format chosen during setup) ----------
+app.post("/api/owner/start-registration", requireOwner, (req, res) => {
+  if (state.bracketGenerated) {
+    return res.status(400).json({ error: "The bracket has already been generated." });
+  }
+  if (state.registrationOpen) {
+    return res.status(400).json({ error: "Registration is already open." });
+  }
+  state.registrationOpen = true;
+  saveState();
+  res.json({ ok: true, matchFormat: state.matchFormat, maxPlayers: state.maxPlayers });
 });
 
 // ---------- Bracket helpers ----------
