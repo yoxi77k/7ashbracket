@@ -132,6 +132,7 @@
   .primary:hover{ box-shadow:0 0 20px rgba(139,107,255,.4); }
   .secondary{ background:#1a1b2c; color:var(--text-0); }
   .ghost{ background:transparent; border:1px solid var(--panel-border); color:var(--text-1); }
+  .ghost.active{ border-color:var(--violet); color:var(--text-0); background:rgba(139,107,255,.18); }
   .danger{ background:linear-gradient(135deg,#ff5f6d,#c22d55); color:#fff; }
 
   .hero{ text-align:center; padding:50px 20px 24px; max-width:820px; margin:0 auto; }
@@ -327,6 +328,14 @@
           <button class="ghost" id="clearLimitBtn">No limit</button>
         </div>
         <div class="empty-note" id="limitStatusNote" style="margin-top:8px;"></div>
+        <div class="field-label" style="margin-top:14px;">Match format</div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          <button class="ghost" data-format="1">1v1</button>
+          <button class="ghost" data-format="2">2v2</button>
+          <button class="ghost" data-format="3">3v3</button>
+          <button class="ghost" data-format="4">4v4</button>
+        </div>
+        <div class="empty-note" id="formatStatusNote" style="margin-top:8px;"></div>
       </div>
       <div class="players-grid" id="playersGrid"></div>
       <div class="empty-note" id="playersEmpty">No players registered yet.</div>
@@ -475,7 +484,7 @@
       chip.innerHTML = `
         <div class="avatar">${avatarHTML(p)}</div>
         <div class="pname">${escapeHTML(p.name)}</div>
-        ${canRemove ? `<button class="del" data-id="${p.id}" data-mine="${isMine ? '1' : '0'}" title="${isMine ? 'Se désinscrire' : 'Retirer ce joueur'}">✕</button>` : ''}
+        ${canRemove ? `<button class="del" data-id="${p.id}" data-mine="${isMine ? '1' : '0'}" title="${isMine ? 'Unregister' : 'Remove this player'}">✕</button>` : ''}
       `;
       grid.appendChild(chip);
     });
@@ -492,6 +501,14 @@
       el('limitStatusNote').textContent = state.maxPlayers
         ? `Current limit: ${state.maxPlayers} players (${state.players.length}/${state.maxPlayers} registered)`
         : `No limit (${state.players.length} registered)`;
+
+      const format = state.matchFormat || 1;
+      document.querySelectorAll('[data-format]').forEach(btn => {
+        btn.classList.toggle('active', Number(btn.dataset.format) === format);
+      });
+      el('formatStatusNote').textContent = format === 1
+        ? 'Current format: 1v1 (solo)'
+        : `Current format: ${format}v${format} (teams formed randomly when the bracket is generated)`;
     } else {
       limitControls.style.display = 'none';
     }
@@ -546,14 +563,26 @@
     };
   }
 
-  function matchSlotHTML(player, isWinner){
-    if(!player){
+  function matchSlotHTML(entry, isWinner){
+    if(!entry){
       return `<div class="match-slot"><div class="avatar">?</div><div class="name tbd">TBD</div></div>`;
+    }
+    if(entry.members){
+      const memberNames = entry.members.map(m => escapeHTML(m.name)).join(', ');
+      return `
+        <div class="match-slot ${isWinner ? 'winner' : ''}" style="flex-direction:column; align-items:flex-start; gap:2px;">
+          <div style="display:flex; align-items:center; gap:10px; width:100%;">
+            <div class="avatar">👥</div>
+            <div class="name">${escapeHTML(entry.name)}</div>
+          </div>
+          <div style="font-size:.72rem; color:var(--text-2); padding-left:38px;">${memberNames}</div>
+        </div>
+      `;
     }
     return `
       <div class="match-slot ${isWinner ? 'winner' : ''}">
-        <div class="avatar">${avatarHTML(player)}</div>
-        <div class="name">${escapeHTML(player.name)}</div>
+        <div class="avatar">${avatarHTML(entry)}</div>
+        <div class="name">${escapeHTML(entry.name)}</div>
       </div>
     `;
   }
@@ -600,7 +629,13 @@
     const actions = card.querySelector('.match-actions');
     const ready = match.player1 && match.player2;
     const myDiscordId = discordUser ? discordUser.id : null;
-    const isParticipant = ready && (match.player1.discordId === myDiscordId || match.player2.discordId === myDiscordId);
+
+    function entryDiscordIds(entry){
+      if(!entry) return [];
+      return entry.members ? entry.members.map(m => m.discordId) : [entry.discordId];
+    }
+
+    const isParticipant = ready && (entryDiscordIds(match.player1).includes(myDiscordId) || entryDiscordIds(match.player2).includes(myDiscordId));
 
     if(!ready){
       actions.innerHTML = `<div class="status-note">Waiting for both players</div>`;
@@ -608,17 +643,15 @@
       actions.innerHTML = `<div class="status-note">✅ Confirmed — ${escapeHTML(match.winner.name)} advances</div>`;
     } else if(match.status === 'awaiting-confirmation'){
       const reportedName = match.reportedWinner === match.player1.id ? match.player1.name : match.player2.name;
-      const p1Confirmed = !!match.confirmations[match.player1.id];
-      const p2Confirmed = !!match.confirmations[match.player2.id];
+      const p1Confirmed = entryDiscordIds(match.player1).some(id => match.confirmations[id]);
+      const p2Confirmed = entryDiscordIds(match.player2).some(id => match.confirmations[id]);
+      const myConfirmed = !!match.confirmations[myDiscordId];
       let confirmButtons = '';
-      if(match.player1.discordId === myDiscordId){
-        confirmButtons += `<button class="confirm-btn" data-confirm-mine ${p1Confirmed ? 'disabled' : ''}>${p1Confirmed ? '✓ You confirmed' : 'I confirm this result'}</button>`;
-      }
-      if(match.player2.discordId === myDiscordId){
-        confirmButtons += `<button class="confirm-btn" data-confirm-mine ${p2Confirmed ? 'disabled' : ''}>${p2Confirmed ? '✓ You confirmed' : 'I confirm this result'}</button>`;
+      if(isParticipant){
+        confirmButtons = `<button class="confirm-btn" data-confirm-mine ${myConfirmed ? 'disabled' : ''}>${myConfirmed ? '✓ You confirmed' : 'I confirm this result'}</button>`;
       }
       actions.innerHTML = `
-        <div class="status-note wait">Reported: ${escapeHTML(reportedName)} won — needs both confirmations (${p1Confirmed ? 1 : 0}${p2Confirmed ? 1 : 0}/2)</div>
+        <div class="status-note wait">Reported: ${escapeHTML(reportedName)} won — needs confirmation from both sides (${p1Confirmed ? 1 : 0}${p2Confirmed ? 1 : 0}/2)</div>
         ${confirmButtons || '<div class="status-note">Only the two players can confirm.</div>'}
       `;
     } else {
@@ -674,12 +707,12 @@
   }
 
   async function removePlayer(playerId, isMine){
-    const confirmMsg = isMine ? 'Te désinscrire du tournoi ?' : 'Remove this player?';
+    const confirmMsg = isMine ? 'Unregister from the tournament?' : 'Remove this player?';
     if(!confirm(confirmMsg)) return;
     try {
       await api('/api/remove-player', { method: 'POST', body: JSON.stringify({ playerId }) });
       await loadState();
-      showToast(isMine ? 'Tu es désinscrit(e).' : 'Player removed');
+      showToast(isMine ? 'You have been unregistered.' : 'Player removed');
     } catch(err){
       showToast(err.message, true);
     }
@@ -740,12 +773,26 @@
 
   el('clearLimitBtn').onclick = () => setMaxPlayers(null);
 
+  async function setMatchFormat(format){
+    try {
+      await api('/api/owner/set-match-format', { method: 'POST', body: JSON.stringify({ format }) });
+      await loadState();
+      showToast(format === 1 ? 'Format set to 1v1' : `Format set to ${format}v${format}`);
+    } catch(err){
+      showToast(err.message, true);
+    }
+  }
+
+  document.querySelectorAll('[data-format]').forEach(btn => {
+    btn.onclick = () => setMatchFormat(Number(btn.dataset.format));
+  });
+
   el('generateBtn').onclick = async () => {
     try {
       const res = await api('/api/owner/generate-bracket', { method: 'POST' });
       await loadState();
       showToast(res.ticketsCreated
-        ? `Bracket generated! ${res.ticketsCreated} salon(s) Discord créé(s)`
+        ? `Bracket generated! ${res.ticketsCreated} Discord channel(s) created`
         : 'Bracket generated!');
     } catch(err){
       showToast(err.message, true);
