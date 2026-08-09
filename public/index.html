@@ -183,6 +183,7 @@
     display:flex; align-items:center; gap:10px; background:#12131f; border:1px solid var(--panel-border);
     border-radius:999px; padding:6px 14px 6px 6px;
   }
+  .player-chip.mine{ border-color:rgba(139,107,255,.5); box-shadow:0 0 12px rgba(139,107,255,.15); }
   .player-chip .avatar{
     width:30px; height:30px; border-radius:50%; overflow:hidden; flex-shrink:0;
     background:linear-gradient(135deg,var(--violet),var(--cyan)); display:flex; align-items:center; justify-content:center;
@@ -453,18 +454,20 @@
     el('playersEmpty').style.display = state.players.length ? 'none' : 'block';
 
     state.players.forEach(p => {
+      const isMine = discordUser && p.discordId === discordUser.id;
+      const canRemove = owner || isMine;
       const chip = document.createElement('div');
-      chip.className = 'player-chip';
+      chip.className = 'player-chip' + (isMine ? ' mine' : '');
       chip.innerHTML = `
         <div class="avatar">${avatarHTML(p)}</div>
         <div class="pname">${escapeHTML(p.name)}</div>
-        ${owner ? `<button class="del" data-id="${p.id}" title="Remove player">✕</button>` : ''}
+        ${canRemove ? `<button class="del" data-id="${p.id}" data-mine="${isMine ? '1' : '0'}" title="${isMine ? 'Se désinscrire' : 'Retirer ce joueur'}">✕</button>` : ''}
       `;
       grid.appendChild(chip);
     });
 
     grid.querySelectorAll('.del').forEach(btn => {
-      btn.onclick = () => deletePlayer(btn.dataset.id);
+      btn.onclick = () => removePlayer(btn.dataset.id, btn.dataset.mine === '1');
     });
 
     el('registerStatus').textContent = state.bracketGenerated
@@ -635,12 +638,13 @@
     }
   }
 
-  async function deletePlayer(playerId){
-    if(!confirm('Remove this player?')) return;
+  async function removePlayer(playerId, isMine){
+    const confirmMsg = isMine ? 'Te désinscrire du tournoi ?' : 'Remove this player?';
+    if(!confirm(confirmMsg)) return;
     try {
-      await api('/api/owner/delete-player', { method: 'POST', body: JSON.stringify({ playerId }) });
+      await api('/api/remove-player', { method: 'POST', body: JSON.stringify({ playerId }) });
       await loadState();
-      showToast('Player removed');
+      showToast(isMine ? 'Tu es désinscrit(e).' : 'Player removed');
     } catch(err){
       showToast(err.message, true);
     }
@@ -678,9 +682,11 @@
 
   el('generateBtn').onclick = async () => {
     try {
-      await api('/api/owner/generate-bracket', { method: 'POST' });
+      const res = await api('/api/owner/generate-bracket', { method: 'POST' });
       await loadState();
-      showToast('Bracket generated!');
+      showToast(res.ticketsCreated
+        ? `Bracket generated! ${res.ticketsCreated} salon(s) Discord créé(s)`
+        : 'Bracket generated!');
     } catch(err){
       showToast(err.message, true);
     }
