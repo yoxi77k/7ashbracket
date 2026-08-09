@@ -314,6 +314,20 @@
     </div>
     <div class="panel">
       <div class="login-gate" id="loginGate"></div>
+      <div id="ownerLimitControls" style="display:none; margin:14px 0; padding:14px; border:1px solid var(--panel-border); border-radius:14px; background:rgba(255,255,255,.03);">
+        <div class="field-label">Registration limit (owner)</div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          <button class="ghost" data-limit="8">8</button>
+          <button class="ghost" data-limit="16">16</button>
+          <button class="ghost" data-limit="32">32</button>
+          <button class="ghost" data-limit="64">64</button>
+          <button class="ghost" data-limit="128">128</button>
+          <input type="number" id="customLimitInput" min="2" placeholder="Custom" style="width:100px;" />
+          <button class="secondary" id="setCustomLimitBtn">Set</button>
+          <button class="ghost" id="clearLimitBtn">No limit</button>
+        </div>
+        <div class="empty-note" id="limitStatusNote" style="margin-top:8px;"></div>
+      </div>
       <div class="players-grid" id="playersGrid"></div>
       <div class="empty-note" id="playersEmpty">No players registered yet.</div>
     </div>
@@ -470,9 +484,25 @@
       btn.onclick = () => removePlayer(btn.dataset.id, btn.dataset.mine === '1');
     });
 
+    const limitReached = !!state.maxPlayers && state.players.length >= state.maxPlayers;
+
+    const limitControls = el('ownerLimitControls');
+    if(owner && !state.bracketGenerated){
+      limitControls.style.display = 'block';
+      el('limitStatusNote').textContent = state.maxPlayers
+        ? `Current limit: ${state.maxPlayers} players (${state.players.length}/${state.maxPlayers} registered)`
+        : `No limit (${state.players.length} registered)`;
+    } else {
+      limitControls.style.display = 'none';
+    }
+
     el('registerStatus').textContent = state.bracketGenerated
       ? 'Closed — the bracket has been generated'
-      : 'Open — log in with Discord to join';
+      : limitReached
+        ? `Full — ${state.players.length}/${state.maxPlayers} players`
+        : state.maxPlayers
+          ? `Open — ${state.players.length}/${state.maxPlayers} players`
+          : 'Open — log in with Discord to join';
 
     const gate = el('loginGate');
     if(state.bracketGenerated){
@@ -490,6 +520,11 @@
     const already = state.players.some(p => p.discordId === discordUser.id);
     if(already){
       gate.innerHTML = `<p>✅ You're registered as <strong>${escapeHTML(discordUser.username)}</strong>.</p>`;
+      return;
+    }
+
+    if(limitReached){
+      gate.innerHTML = `<p>😕 Registrations are full (${state.maxPlayers} players max).</p>`;
       return;
     }
 
@@ -679,6 +714,31 @@
       showToast(err.message, true);
     }
   }
+
+  async function setMaxPlayers(value){
+    try {
+      await api('/api/owner/set-max-players', { method: 'POST', body: JSON.stringify({ maxPlayers: value }) });
+      await loadState();
+      showToast(value ? `Limit set to ${value} players` : 'Limit removed');
+    } catch(err){
+      showToast(err.message, true);
+    }
+  }
+
+  document.querySelectorAll('[data-limit]').forEach(btn => {
+    btn.onclick = () => setMaxPlayers(Number(btn.dataset.limit));
+  });
+
+  el('setCustomLimitBtn').onclick = () => {
+    const val = Number(el('customLimitInput').value);
+    if(!val || val < 2){
+      showToast('Enter a valid number (at least 2).', true);
+      return;
+    }
+    setMaxPlayers(val);
+  };
+
+  el('clearLimitBtn').onclick = () => setMaxPlayers(null);
 
   el('generateBtn').onclick = async () => {
     try {
