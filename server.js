@@ -68,7 +68,7 @@ function requireOwner(req, res, next) {
 // restart) — the client just re-fetches /api/state, which reflects
 // whatever is currently on disk. No change needed for that part.
 function defaultState() {
-  return { players: [], bracketGenerated: false, rounds: [] };
+  return { players: [], bracketGenerated: false, rounds: [], maxPlayers: null };
 }
 
 function loadState() {
@@ -84,6 +84,7 @@ function saveState() {
 }
 
 let state = loadState();
+if (state.maxPlayers === undefined) state.maxPlayers = null; // backward-compat with older save files
 
 // ---------- Discord OAuth2 ----------
 app.get("/auth/discord", (req, res) => {
@@ -179,6 +180,9 @@ app.post("/api/register", (req, res) => {
   if (state.bracketGenerated) {
     return res.status(400).json({ error: "Registrations are closed." });
   }
+  if (state.maxPlayers && state.players.length >= state.maxPlayers) {
+    return res.status(400).json({ error: `Registrations are full (${state.maxPlayers} max).` });
+  }
   if (state.players.some(p => p.discordId === req.session.discordUser.id)) {
     return res.status(400).json({ error: "You are already registered." });
   }
@@ -220,6 +224,29 @@ app.post("/api/remove-player", (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- Owner: set a registration cap (8/16/32/64/128/custom, or none) ----------
+app.post("/api/owner/set-max-players", requireOwner, (req, res) => {
+  let { maxPlayers } = req.body || {};
+
+  if (maxPlayers === null || maxPlayers === undefined || maxPlayers === 0 || maxPlayers === "") {
+    state.maxPlayers = null;
+    saveState();
+    return res.json({ ok: true, maxPlayers: null });
+  }
+
+  const n = Number(maxPlayers);
+  if (!Number.isInteger(n) || n < 2) {
+    return res.status(400).json({ error: "The limit must be a whole number of at least 2 (or empty for no limit)." });
+  }
+  if (n < state.players.length) {
+    return res.status(400).json({ error: `${state.players.length} players are already registered, the limit can't be lower than that.` });
+  }
+
+  state.maxPlayers = n;
+  saveState();
+  res.json({ ok: true, maxPlayers: n });
+});
+
 // ---------- Bracket helpers ----------
 function shuffle(arr) {
   const a = [...arr];
@@ -254,11 +281,28 @@ function findMatch(matchId) {
   return null;
 }
 
-function confirmAndPropagate(found) {
+async function confirmAndPropagate(found) {
   const { roundIndex, matchIndex, match } = found;
   match.status = "confirmed";
   match.winner = match.reportedWinner === match.player1.id ? match.player1 : match.player2;
   placeWinner(roundIndex, matchIndex, match.winner);
+
+  // Best-effort Discord side-effects: announce the result in the match's
+  // ticket channel, rename it, and open a new ticket for the next round
+  // once both of its players are known. Never blocks the API response.
+  try {
+    await announceMatchResult(match);
+
+    const nextRound = state.rounds[roundIndex + 1];
+    if (nextRound) {
+      const nextMatch = nextRound.matches[Math.floor(matchIndex / 2)];
+      if (nextMatch.player1 && nextMatch.player2 && !nextMatch.channelId) {
+        await createMatchTicket(nextMatch);
+      }
+    }
+  } catch (err) {
+    console.error("Discord post-match step failed:", err.message);
+  }
 }
 
 // ---------- Discord ticket channels (one per round-1 1v1 match) ----------
@@ -334,18 +378,31 @@ async function createTicketForMatch(p1, p2) {
   return channel;
 }
 
-async function createRound1Tickets(round1Matches) {
+// Creates (and stores) the channel id on a single match, if it doesn't have one yet.
+async function createMatchTicket(match) {
+  if (!ticketsConfigured) return;
+  if (!match.player1 || !match.player2) return;
+  if (match.channelId) return; // already has a ticket
+
+  const channel = await createTicketForMatch(match.player1, match.player2);
+  match.channelId = channel.id;
+}
+
+// Loops over a set of matches and creates a ticket for every one that's
+// ready (both players known) and doesn't have a channel yet. Used right
+// after generating the bracket (round 1, and round 2 if byes made it
+// instantly ready).
+async function createTicketsForReadyMatches(matches) {
   if (!ticketsConfigured) {
     console.warn("⚠️  DISCORD_BOT_TOKEN / DISCORD_GUILD_ID missing — skipping ticket channel creation.");
     return 0;
   }
 
   let created = 0;
-  for (const match of round1Matches) {
-    // Only create a ticket for real 1v1 matches (skip byes where one side is empty)
-    if (!match.player1 || !match.player2) continue;
+  for (const match of matches) {
+    if (!match.player1 || !match.player2 || match.channelId) continue;
     try {
-      await createTicketForMatch(match.player1, match.player2);
+      await createMatchTicket(match);
       created++;
     } catch (err) {
       console.error(`Failed to create ticket for match ${match.id}:`, err.message);
@@ -353,6 +410,28 @@ async function createRound1Tickets(round1Matches) {
     await sleep(400); // stay comfortably under Discord's rate limits
   }
   return created;
+}
+
+// Posts the result in English in the match's ticket channel and renames
+// it to flag it as finished. Best-effort — silently no-ops if there's no
+// channel (e.g. Discord tickets aren't configured).
+async function announceMatchResult(match) {
+  if (!ticketsConfigured || !match.channelId) return;
+
+  const loser = match.winner.id === match.player1.id ? match.player2 : match.player1;
+
+  await discordApi(`/channels/${match.channelId}/messages`, {
+    method: "POST",
+    body: JSON.stringify({
+      content: `🏆 **${match.winner.name}** win\n💀 **${loser.name}** lost`
+    })
+  });
+
+  const base = `${sanitizeChannelName(match.player1.name)}-vs-${sanitizeChannelName(match.player2.name)}`;
+  await discordApi(`/channels/${match.channelId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name: `${base}-finished`.slice(0, 95) })
+  });
 }
 
 // ---------- Owner: generate / reset bracket ----------
@@ -378,7 +457,7 @@ app.post("/api/owner/generate-bracket", requireOwner, async (req, res) => {
     const match = {
       id: crypto.randomUUID(),
       player1: p1, player2: p2,
-      status: "pending", reportedWinner: null, confirmations: {}, winner: null
+      status: "pending", reportedWinner: null, confirmations: {}, winner: null, channelId: null
     };
     if (p1 && !p2) { match.winner = p1; match.status = "confirmed"; }
     else if (!p1 && p2) { match.winner = p2; match.status = "confirmed"; }
@@ -393,7 +472,7 @@ app.post("/api/owner/generate-bracket", requireOwner, async (req, res) => {
       matches.push({
         id: crypto.randomUUID(),
         player1: null, player2: null,
-        status: "pending", reportedWinner: null, confirmations: {}, winner: null
+        status: "pending", reportedWinner: null, confirmations: {}, winner: null, channelId: null
       });
     }
     rounds.push({ name: roundName(r, totalRounds), matches });
@@ -413,7 +492,10 @@ app.post("/api/owner/generate-bracket", requireOwner, async (req, res) => {
   // If this fails or isn't configured, the bracket itself is still generated.
   let ticketsCreated = 0;
   try {
-    ticketsCreated = await createRound1Tickets(round1Matches);
+    ticketsCreated += await createTicketsForReadyMatches(round1Matches);
+    if (state.rounds[1]) {
+      ticketsCreated += await createTicketsForReadyMatches(state.rounds[1].matches);
+    }
   } catch (err) {
     console.error("Ticket creation step failed:", err);
   }
@@ -485,7 +567,7 @@ app.post("/api/report-result", (req, res) => {
   res.json({ ok: true });
 });
 
-app.post("/api/confirm-result", (req, res) => {
+app.post("/api/confirm-result", async (req, res) => {
   if (!req.session.discordUser) {
     return res.status(401).json({ error: "Log in with Discord first." });
   }
@@ -508,13 +590,13 @@ app.post("/api/confirm-result", (req, res) => {
     !!match.confirmations[match.player1.discordId] &&
     !!match.confirmations[match.player2.discordId];
 
-  if (bothConfirmed) confirmAndPropagate(found);
+  if (bothConfirmed) await confirmAndPropagate(found);
 
   saveState();
   res.json({ ok: true });
 });
 
-app.post("/api/owner/set-result", requireOwner, (req, res) => {
+app.post("/api/owner/set-result", requireOwner, async (req, res) => {
   const { matchId, winnerId } = req.body || {};
   const found = findMatch(matchId);
   if (!found) return res.status(404).json({ error: "Match not found." });
@@ -528,7 +610,7 @@ app.post("/api/owner/set-result", requireOwner, (req, res) => {
   }
 
   match.reportedWinner = winnerId;
-  confirmAndPropagate(found);
+  await confirmAndPropagate(found);
   saveState();
   res.json({ ok: true });
 });
