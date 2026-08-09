@@ -316,7 +316,17 @@
     <div class="panel">
       <div class="login-gate" id="loginGate"></div>
       <div id="ownerLimitControls" style="display:none; margin:14px 0; padding:14px; border:1px solid var(--panel-border); border-radius:14px; background:rgba(255,255,255,.03);">
-        <div class="field-label">Registration limit (owner)</div>
+        <div id="formatSetupBlock">
+          <div class="field-label">Match format</div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+            <button class="ghost" data-format="1">1v1</button>
+            <button class="ghost" data-format="2">2v2</button>
+            <button class="ghost" data-format="3">3v3</button>
+            <button class="ghost" data-format="4">4v4</button>
+          </div>
+        </div>
+        <div class="empty-note" id="formatStatusNote" style="margin-top:8px;"></div>
+        <div class="field-label" style="margin-top:14px;">Registration limit</div>
         <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
           <button class="ghost" data-limit="8">8</button>
           <button class="ghost" data-limit="16">16</button>
@@ -328,14 +338,7 @@
           <button class="ghost" id="clearLimitBtn">No limit</button>
         </div>
         <div class="empty-note" id="limitStatusNote" style="margin-top:8px;"></div>
-        <div class="field-label" style="margin-top:14px;">Match format</div>
-        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-          <button class="ghost" data-format="1">1v1</button>
-          <button class="ghost" data-format="2">2v2</button>
-          <button class="ghost" data-format="3">3v3</button>
-          <button class="ghost" data-format="4">4v4</button>
-        </div>
-        <div class="empty-note" id="formatStatusNote" style="margin-top:8px;"></div>
+        <button class="primary" id="startRegistrationBtn" style="margin-top:14px; display:none;">🚀 Start registration</button>
       </div>
       <div class="players-grid" id="playersGrid"></div>
       <div class="empty-note" id="playersEmpty">No players registered yet.</div>
@@ -482,22 +485,45 @@
     const totalRegistered = totalRegisteredCount();
     const limitReached = !!state.maxPlayers && totalRegistered >= state.maxPlayers;
 
-    // Owner controls (limit + format) — shown the same way regardless of mode
+    // Owner setup controls (format + limit + Start button)
     const limitControls = el('ownerLimitControls');
     if(owner && !state.bracketGenerated){
       limitControls.style.display = 'block';
+
+      if(state.registrationOpen){
+        // Format is locked in once registration has started
+        el('formatSetupBlock').style.display = 'none';
+        el('formatStatusNote').textContent = format === 1
+          ? 'Format: 1v1 (solo) — locked in, registration is open'
+          : `Format: ${format}v${format} — locked in, registration is open`;
+        el('startRegistrationBtn').style.display = 'none';
+      } else {
+        el('formatSetupBlock').style.display = 'block';
+        document.querySelectorAll('[data-format]').forEach(btn => {
+          btn.classList.toggle('active', Number(btn.dataset.format) === format);
+        });
+        el('formatStatusNote').textContent = format === 1
+          ? 'Format: 1v1 (solo) — choose a format, then start registration'
+          : `Format: ${format}v${format} — players will create/join their own team`;
+        el('startRegistrationBtn').style.display = 'inline-block';
+      }
+
       el('limitStatusNote').textContent = state.maxPlayers
         ? `Current limit: ${state.maxPlayers} players (${totalRegistered}/${state.maxPlayers} registered)`
         : `No limit (${totalRegistered} registered)`;
-
-      document.querySelectorAll('[data-format]').forEach(btn => {
-        btn.classList.toggle('active', Number(btn.dataset.format) === format);
-      });
-      el('formatStatusNote').textContent = format === 1
-        ? 'Current format: 1v1 (solo)'
-        : `Current format: ${format}v${format} — players create or join their own team`;
     } else {
       limitControls.style.display = 'none';
+    }
+
+    if(!state.bracketGenerated && !state.registrationOpen){
+      el('registerStatus').textContent = owner ? 'Not started — configure the tournament above' : 'Not started yet';
+      el('playersEmpty').style.display = 'block';
+      el('playersEmpty').textContent = 'Registration hasn\'t started yet.';
+      el('playersGrid').innerHTML = '';
+      el('loginGate').innerHTML = owner
+        ? `<p>Choose a format and (optionally) a player limit above, then click <strong>Start registration</strong> to open sign-ups.</p>`
+        : `<p>⏳ The owner hasn't opened registration yet — check back soon.</p>`;
+      return;
     }
 
     el('registerStatus').textContent = state.bracketGenerated
@@ -606,9 +632,16 @@
         `;
       }).join('');
 
+      // team.code is only present in the API response for the team's own
+      // members or the owner (see server-side sanitization of /api/state).
+      const codeHTML = team.code
+        ? `<div style="font-size:.72rem; color:var(--text-2);">Code: <strong style="letter-spacing:1.5px; color:var(--cyan);">${escapeHTML(team.code)}</strong></div>`
+        : '';
+
       card.innerHTML = `
         <div style="font-weight:700;">${escapeHTML(team.name)} <span style="color:var(--text-2); font-weight:600;">(${team.members.length}/${format})</span></div>
         <div style="display:flex; flex-wrap:wrap;">${membersHTML}</div>
+        ${codeHTML}
       `;
       grid.appendChild(card);
     });
@@ -632,7 +665,12 @@
 
     const myTeam = teams.find(t => t.members.some(m => m.discordId === discordUser.id));
     if(myTeam){
-      gate.innerHTML = `<p>✅ You're in <strong>${escapeHTML(myTeam.name)}</strong> (${myTeam.members.length}/${format}).</p>`;
+      gate.innerHTML = `
+        <div>
+          <p style="margin-bottom:6px;">✅ You're in <strong>${escapeHTML(myTeam.name)}</strong> (${myTeam.members.length}/${format}).</p>
+          ${myTeam.code ? `<p>Share this code with your teammates so they can join: <strong style="letter-spacing:2px; font-size:1.15rem; color:var(--cyan);">${escapeHTML(myTeam.code)}</strong></p>` : ''}
+        </div>
+      `;
       return;
     }
 
@@ -641,16 +679,6 @@
       return;
     }
 
-    const openTeams = teams.filter(t => t.members.length < format);
-    const openTeamsHTML = openTeams.length
-      ? openTeams.map(t => `
-          <div style="display:flex; align-items:center; gap:8px; padding:8px; border:1px solid var(--panel-border); border-radius:10px; margin-bottom:6px;">
-            <div style="flex:1;">${escapeHTML(t.name)} — ${t.members.length}/${format}</div>
-            <button class="secondary" data-join="${t.id}">Join</button>
-          </div>
-        `).join('')
-      : `<div class="empty-note">No open teams yet — create one below!</div>`;
-
     gate.innerHTML = `
       <div style="width:100%;">
         <div class="field-label">Create a new team</div>
@@ -658,8 +686,11 @@
           <input type="text" id="teamNameInput" placeholder="Team name" maxlength="30" />
           <button class="primary" id="createTeamBtn">Create team</button>
         </div>
-        <div class="field-label">Or join an existing team</div>
-        ${openTeamsHTML}
+        <div class="field-label">Or join a team with its code</div>
+        <div class="register-row">
+          <input type="text" id="teamCodeInput" placeholder="Enter team code" maxlength="10" style="text-transform:uppercase; letter-spacing:1.5px;" />
+          <button class="secondary" id="joinTeamBtn">Join</button>
+        </div>
       </div>
     `;
 
@@ -669,23 +700,23 @@
       try {
         await api('/api/teams/create', { method: 'POST', body: JSON.stringify({ name }) });
         await loadState();
-        showToast('Team created!');
+        showToast('Team created! Share your team code with your teammates.');
       } catch(err){
         showToast(err.message, true);
       }
     };
 
-    document.querySelectorAll('[data-join]').forEach(btn => {
-      btn.onclick = async () => {
-        try {
-          await api('/api/teams/join', { method: 'POST', body: JSON.stringify({ teamId: btn.dataset.join }) });
-          await loadState();
-          showToast('Joined the team!');
-        } catch(err){
-          showToast(err.message, true);
-        }
-      };
-    });
+    el('joinTeamBtn').onclick = async () => {
+      const code = el('teamCodeInput').value.trim();
+      if(!code){ showToast('Enter a team code.', true); return; }
+      try {
+        await api('/api/teams/join', { method: 'POST', body: JSON.stringify({ code }) });
+        await loadState();
+        showToast('Joined the team!');
+      } catch(err){
+        showToast(err.message, true);
+      }
+    };
   }
 
   function matchSlotHTML(entry, isWinner){
@@ -913,10 +944,9 @@
 
   async function setMatchFormat(format){
     try {
-      const res = await api('/api/owner/set-match-format', { method: 'POST', body: JSON.stringify({ format }) });
+      await api('/api/owner/set-match-format', { method: 'POST', body: JSON.stringify({ format }) });
       await loadState();
-      const label = format === 1 ? '1v1' : `${format}v${format}`;
-      showToast(res.reset ? `Format set to ${label} — previous registrations were cleared` : `Format set to ${label}`);
+      showToast(format === 1 ? 'Format set to 1v1' : `Format set to ${format}v${format}`);
     } catch(err){
       showToast(err.message, true);
     }
@@ -925,6 +955,16 @@
   document.querySelectorAll('[data-format]').forEach(btn => {
     btn.onclick = () => setMatchFormat(Number(btn.dataset.format));
   });
+
+  el('startRegistrationBtn').onclick = async () => {
+    try {
+      await api('/api/owner/start-registration', { method: 'POST' });
+      await loadState();
+      showToast('Registration is now open!');
+    } catch(err){
+      showToast(err.message, true);
+    }
+  };
 
   el('generateBtn').onclick = async () => {
     try {
