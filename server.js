@@ -68,7 +68,7 @@ function requireOwner(req, res, next) {
 // restart) — the client just re-fetches /api/state, which reflects
 // whatever is currently on disk. No change needed for that part.
 function defaultState() {
-  return { players: [], bracketGenerated: false, rounds: [], maxPlayers: null, matchFormat: 1 };
+  return { players: [], teams: [], bracketGenerated: false, rounds: [], maxPlayers: null, matchFormat: 1 };
 }
 
 function loadState() {
@@ -86,6 +86,12 @@ function saveState() {
 let state = loadState();
 if (state.maxPlayers === undefined) state.maxPlayers = null; // backward-compat with older save files
 if (!state.matchFormat) state.matchFormat = 1; // backward-compat: default to solo 1v1
+if (!Array.isArray(state.teams)) state.teams = []; // backward-compat with older save files
+
+function totalRegisteredCount() {
+  const format = state.matchFormat || 1;
+  return format === 1 ? state.players.length : state.teams.reduce((sum, t) => sum + t.members.length, 0);
+}
 
 // ---------- Discord OAuth2 ----------
 app.get("/auth/discord", (req, res) => {
@@ -173,15 +179,18 @@ app.get("/api/state", (req, res) => {
   res.json(state);
 });
 
-// ---------- Registration ----------
+// ---------- Registration (solo, 1v1 mode only) ----------
 app.post("/api/register", (req, res) => {
   if (!req.session.discordUser) {
     return res.status(401).json({ error: "Log in with Discord first." });
   }
+  if ((state.matchFormat || 1) !== 1) {
+    return res.status(400).json({ error: "Team mode is active — create or join a team instead." });
+  }
   if (state.bracketGenerated) {
     return res.status(400).json({ error: "Registrations are closed." });
   }
-  if (state.maxPlayers && state.players.length >= state.maxPlayers) {
+  if (state.maxPlayers && totalRegisteredCount() >= state.maxPlayers) {
     return res.status(400).json({ error: `Registrations are full (${state.maxPlayers} max).` });
   }
   if (state.players.some(p => p.discordId === req.session.discordUser.id)) {
@@ -201,8 +210,11 @@ app.post("/api/register", (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- Remove a player: the player themselves, or the owner ----------
+// ---------- Remove a player: the player themselves, or the owner (solo mode) ----------
 app.post("/api/remove-player", (req, res) => {
+  if ((state.matchFormat || 1) !== 1) {
+    return res.status(400).json({ error: "Team mode is active — use the team endpoints instead." });
+  }
   if (state.bracketGenerated) {
     return res.status(400).json({ error: "Reset the bracket before removing players." });
   }
@@ -225,6 +237,115 @@ app.post("/api/remove-player", (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- Team registration (2v2 / 3v3 / 4v4) ----------
+app.post("/api/teams/create", (req, res) => {
+  if (!req.session.discordUser) {
+    return res.status(401).json({ error: "Log in with Discord first." });
+  }
+  const format = state.matchFormat || 1;
+  if (format === 1) {
+    return res.status(400).json({ error: "Solo mode is active — register directly instead." });
+  }
+  if (state.bracketGenerated) {
+    return res.status(400).json({ error: "Registrations are closed." });
+  }
+  if (state.maxPlayers && totalRegisteredCount() >= state.maxPlayers) {
+    return res.status(400).json({ error: `Registrations are full (${state.maxPlayers} max).` });
+  }
+
+  const myId = req.session.discordUser.id;
+  if (state.teams.some(t => t.members.some(m => m.discordId === myId))) {
+    return res.status(400).json({ error: "You're already in a team." });
+  }
+
+  const name = String(req.body?.name || "").trim().slice(0, 30);
+  if (!name) {
+    return res.status(400).json({ error: "Enter a team name." });
+  }
+
+  state.teams.push({
+    id: crypto.randomUUID(),
+    name,
+    members: [{
+      id: crypto.randomUUID(),
+      discordId: myId,
+      name: req.session.discordUser.username,
+      image: req.session.discordUser.avatarUrl
+    }]
+  });
+
+  saveState();
+  res.json({ ok: true });
+});
+
+app.post("/api/teams/join", (req, res) => {
+  if (!req.session.discordUser) {
+    return res.status(401).json({ error: "Log in with Discord first." });
+  }
+  const format = state.matchFormat || 1;
+  if (format === 1) {
+    return res.status(400).json({ error: "Solo mode is active — register directly instead." });
+  }
+  if (state.bracketGenerated) {
+    return res.status(400).json({ error: "Registrations are closed." });
+  }
+  if (state.maxPlayers && totalRegisteredCount() >= state.maxPlayers) {
+    return res.status(400).json({ error: `Registrations are full (${state.maxPlayers} max).` });
+  }
+
+  const myId = req.session.discordUser.id;
+  if (state.teams.some(t => t.members.some(m => m.discordId === myId))) {
+    return res.status(400).json({ error: "You're already in a team." });
+  }
+
+  const { teamId } = req.body || {};
+  const team = state.teams.find(t => t.id === teamId);
+  if (!team) {
+    return res.status(404).json({ error: "Team not found." });
+  }
+  if (team.members.length >= format) {
+    return res.status(400).json({ error: "This team is already full." });
+  }
+
+  team.members.push({
+    id: crypto.randomUUID(),
+    discordId: myId,
+    name: req.session.discordUser.username,
+    image: req.session.discordUser.avatarUrl
+  });
+
+  saveState();
+  res.json({ ok: true });
+});
+
+// Remove a team member: the member themselves (leave), or the owner.
+// If the team ends up empty, it's deleted.
+app.post("/api/remove-team-member", (req, res) => {
+  if (state.bracketGenerated) {
+    return res.status(400).json({ error: "Reset the bracket before changing teams." });
+  }
+
+  const { teamId, discordId } = req.body || {};
+  const team = state.teams.find(t => t.id === teamId);
+  if (!team) {
+    return res.status(404).json({ error: "Team not found." });
+  }
+
+  const isSelf = req.session.discordUser && req.session.discordUser.id === discordId;
+  const isOwner = !!req.session.isOwner;
+  if (!isSelf && !isOwner) {
+    return res.status(403).json({ error: "You can only remove yourself." });
+  }
+
+  team.members = team.members.filter(m => m.discordId !== discordId);
+  if (team.members.length === 0) {
+    state.teams = state.teams.filter(t => t.id !== teamId);
+  }
+
+  saveState();
+  res.json({ ok: true });
+});
+
 // ---------- Owner: set a registration cap (8/16/32/64/128/custom, or none) ----------
 app.post("/api/owner/set-max-players", requireOwner, (req, res) => {
   let { maxPlayers } = req.body || {};
@@ -239,8 +360,9 @@ app.post("/api/owner/set-max-players", requireOwner, (req, res) => {
   if (!Number.isInteger(n) || n < 2) {
     return res.status(400).json({ error: "The limit must be a whole number of at least 2 (or empty for no limit)." });
   }
-  if (n < state.players.length) {
-    return res.status(400).json({ error: `${state.players.length} players are already registered, the limit can't be lower than that.` });
+  const registered = totalRegisteredCount();
+  if (n < registered) {
+    return res.status(400).json({ error: `${registered} players are already registered, the limit can't be lower than that.` });
   }
 
   state.maxPlayers = n;
@@ -249,14 +371,27 @@ app.post("/api/owner/set-max-players", requireOwner, (req, res) => {
 });
 
 // ---------- Owner: set the match format (1v1 / 2v2 / 3v3 / 4v4) ----------
+// Switching format changes what "registered" means (solo players vs teams),
+// so any existing registrations are cleared to avoid a mixed, invalid state.
 app.post("/api/owner/set-match-format", requireOwner, (req, res) => {
+  if (state.bracketGenerated) {
+    return res.status(400).json({ error: "Reset the bracket before changing the match format." });
+  }
   const format = Number((req.body || {}).format);
   if (![1, 2, 3, 4].includes(format)) {
     return res.status(400).json({ error: "Format must be 1, 2, 3, or 4 (players per team)." });
   }
+
+  let reset = false;
+  if (format !== state.matchFormat) {
+    if (state.players.length > 0 || state.teams.length > 0) reset = true;
+    state.players = [];
+    state.teams = [];
+  }
+
   state.matchFormat = format;
   saveState();
-  res.json({ ok: true, matchFormat: format });
+  res.json({ ok: true, matchFormat: format, reset });
 });
 
 // ---------- Bracket helpers ----------
@@ -288,27 +423,6 @@ function entryDiscordIds(entry) {
 
 function entryHasDiscordId(entry, discordId) {
   return !!discordId && entryDiscordIds(entry).includes(discordId);
-}
-
-// Shuffles the registered players and groups them into teams of `format`
-// players. With format === 1, each entry is just the player themselves
-// (identical to the original solo behaviour). Any leftover players that
-// don't fill a full team still form a (smaller) team rather than being
-// dropped.
-function buildEntries(players, format) {
-  const shuffled = shuffle(players);
-  if (format <= 1) return shuffled;
-
-  const entries = [];
-  for (let i = 0; i < shuffled.length; i += format) {
-    const members = shuffled.slice(i, i + format);
-    entries.push({
-      id: crypto.randomUUID(),
-      name: `Team ${entries.length + 1}`,
-      members
-    });
-  }
-  return entries;
 }
 
 function placeWinner(roundIndex, matchIndex, winner) {
@@ -483,15 +597,31 @@ async function announceMatchResult(match) {
 
 // ---------- Owner: generate / reset bracket ----------
 app.post("/api/owner/generate-bracket", requireOwner, async (req, res) => {
-  const format = state.matchFormat || 1;
-  if (state.players.length < 2 * format) {
-    return res.status(400).json({ error: `Need at least ${2 * format} players for a ${format}v${format} bracket.` });
-  }
   if (state.bracketGenerated) {
     return res.status(400).json({ error: "Bracket already generated." });
   }
 
-  const shuffled = buildEntries(state.players, format);
+  const format = state.matchFormat || 1;
+  let shuffled;
+
+  if (format === 1) {
+    if (state.players.length < 2) {
+      return res.status(400).json({ error: "Need at least 2 players." });
+    }
+    shuffled = shuffle(state.players);
+  } else {
+    if (state.teams.length < 2) {
+      return res.status(400).json({ error: `Need at least 2 teams for a ${format}v${format} bracket.` });
+    }
+    const incomplete = state.teams.filter(t => t.members.length !== format);
+    if (incomplete.length > 0) {
+      return res.status(400).json({
+        error: `These teams aren't full yet (need ${format} players each): ${incomplete.map(t => t.name).join(", ")}.`
+      });
+    }
+    shuffled = shuffle(state.teams);
+  }
+
   let bracketSize = 1;
   while (bracketSize < shuffled.length) bracketSize *= 2;
   const totalRounds = Math.log2(bracketSize);
