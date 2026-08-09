@@ -68,7 +68,7 @@ function requireOwner(req, res, next) {
 // restart) — the client just re-fetches /api/state, which reflects
 // whatever is currently on disk. No change needed for that part.
 function defaultState() {
-  return { players: [], bracketGenerated: false, rounds: [], maxPlayers: null };
+  return { players: [], bracketGenerated: false, rounds: [], maxPlayers: null, matchFormat: 1 };
 }
 
 function loadState() {
@@ -85,6 +85,7 @@ function saveState() {
 
 let state = loadState();
 if (state.maxPlayers === undefined) state.maxPlayers = null; // backward-compat with older save files
+if (!state.matchFormat) state.matchFormat = 1; // backward-compat: default to solo 1v1
 
 // ---------- Discord OAuth2 ----------
 app.get("/auth/discord", (req, res) => {
@@ -247,6 +248,17 @@ app.post("/api/owner/set-max-players", requireOwner, (req, res) => {
   res.json({ ok: true, maxPlayers: n });
 });
 
+// ---------- Owner: set the match format (1v1 / 2v2 / 3v3 / 4v4) ----------
+app.post("/api/owner/set-match-format", requireOwner, (req, res) => {
+  const format = Number((req.body || {}).format);
+  if (![1, 2, 3, 4].includes(format)) {
+    return res.status(400).json({ error: "Format must be 1, 2, 3, or 4 (players per team)." });
+  }
+  state.matchFormat = format;
+  saveState();
+  res.json({ ok: true, matchFormat: format });
+});
+
 // ---------- Bracket helpers ----------
 function shuffle(arr) {
   const a = [...arr];
@@ -263,6 +275,40 @@ function roundName(roundIndex, totalRounds) {
   if (fromEnd === 2) return "Semifinals";
   if (fromEnd === 3) return "Quarterfinals";
   return `Round ${roundIndex + 1}`;
+}
+
+// An "entry" in a match is either a solo player ({ id, discordId, name, image })
+// or a team ({ id, name, members: [player, player, ...] }) when matchFormat > 1.
+// These helpers let the rest of the code (participant checks, confirmations,
+// Discord permissions) treat both shapes the same way.
+function entryDiscordIds(entry) {
+  if (!entry) return [];
+  return entry.members ? entry.members.map(m => m.discordId) : [entry.discordId];
+}
+
+function entryHasDiscordId(entry, discordId) {
+  return !!discordId && entryDiscordIds(entry).includes(discordId);
+}
+
+// Shuffles the registered players and groups them into teams of `format`
+// players. With format === 1, each entry is just the player themselves
+// (identical to the original solo behaviour). Any leftover players that
+// don't fill a full team still form a (smaller) team rather than being
+// dropped.
+function buildEntries(players, format) {
+  const shuffled = shuffle(players);
+  if (format <= 1) return shuffled;
+
+  const entries = [];
+  for (let i = 0; i < shuffled.length; i += format) {
+    const members = shuffled.slice(i, i + format);
+    entries.push({
+      id: crypto.randomUUID(),
+      name: `Team ${entries.length + 1}`,
+      members
+    });
+  }
+  return entries;
 }
 
 function placeWinner(roundIndex, matchIndex, winner) {
@@ -342,13 +388,13 @@ async function discordApi(endpoint, options = {}) {
   return body;
 }
 
-async function createTicketForMatch(p1, p2) {
-  const channelName = `${sanitizeChannelName(p1.name)}-vs-${sanitizeChannelName(p2.name)}`;
+async function createTicketForMatch(entry1, entry2) {
+  const channelName = `${sanitizeChannelName(entry1.name)}-vs-${sanitizeChannelName(entry2.name)}`;
+  const allDiscordIds = [...entryDiscordIds(entry1), ...entryDiscordIds(entry2)];
 
   const permission_overwrites = [
     { id: DISCORD_GUILD_ID, type: 0, deny: PERM_DENY_VIEW }, // @everyone (role id == guild id)
-    { id: p1.discordId, type: 1, allow: PERM_ALLOW_ALL },
-    { id: p2.discordId, type: 1, allow: PERM_ALLOW_ALL }
+    ...allDiscordIds.map(discordId => ({ id: discordId, type: 1, allow: PERM_ALLOW_ALL }))
   ];
   if (DISCORD_MODERATOR_ROLE_ID) {
     permission_overwrites.push({ id: DISCORD_MODERATOR_ROLE_ID, type: 0, allow: PERM_ALLOW_ALL });
@@ -364,14 +410,15 @@ async function createTicketForMatch(p1, p2) {
     })
   });
 
+  const mentions = allDiscordIds.map(id => `<@${id}>`).join(" ");
   const modPing = DISCORD_MODERATOR_ROLE_ID ? ` <@&${DISCORD_MODERATOR_ROLE_ID}>` : "";
   await discordApi(`/channels/${channel.id}/messages`, {
     method: "POST",
     body: JSON.stringify({
       content:
-        `🥊 **${p1.name}** vs **${p2.name}**\n` +
-        `<@${p1.discordId}> <@${p2.discordId}>${modPing}\n` +
-        `Ce salon est privé pour votre match. Un modérateur va vous rejoindre pour arbitrer.`
+        `🥊 **${entry1.name}** vs **${entry2.name}**\n` +
+        `${mentions}${modPing}\n` +
+        `This channel is private for your match. A moderator will join to referee.`
     })
   });
 
@@ -436,14 +483,15 @@ async function announceMatchResult(match) {
 
 // ---------- Owner: generate / reset bracket ----------
 app.post("/api/owner/generate-bracket", requireOwner, async (req, res) => {
-  if (state.players.length < 2) {
-    return res.status(400).json({ error: "Need at least 2 players." });
+  const format = state.matchFormat || 1;
+  if (state.players.length < 2 * format) {
+    return res.status(400).json({ error: `Need at least ${2 * format} players for a ${format}v${format} bracket.` });
   }
   if (state.bracketGenerated) {
     return res.status(400).json({ error: "Bracket already generated." });
   }
 
-  const shuffled = shuffle(state.players);
+  const shuffled = buildEntries(state.players, format);
   let bracketSize = 1;
   while (bracketSize < shuffled.length) bracketSize *= 2;
   const totalRounds = Math.log2(bracketSize);
@@ -549,7 +597,7 @@ app.post("/api/report-result", (req, res) => {
   }
 
   const myId = req.session.discordUser.id;
-  const isParticipant = match.player1.discordId === myId || match.player2.discordId === myId;
+  const isParticipant = entryHasDiscordId(match.player1, myId) || entryHasDiscordId(match.player2, myId);
   if (!isParticipant) {
     return res.status(403).json({ error: "Only the two players in this match can report a result." });
   }
@@ -577,7 +625,7 @@ app.post("/api/confirm-result", async (req, res) => {
 
   const { match } = found;
   const myId = req.session.discordUser.id;
-  const isParticipant = match.player1?.discordId === myId || match.player2?.discordId === myId;
+  const isParticipant = entryHasDiscordId(match.player1, myId) || entryHasDiscordId(match.player2, myId);
   if (!isParticipant) {
     return res.status(403).json({ error: "Only the two players in this match can confirm." });
   }
@@ -586,11 +634,10 @@ app.post("/api/confirm-result", async (req, res) => {
   }
 
   match.confirmations[myId] = true;
-  const bothConfirmed =
-    !!match.confirmations[match.player1.discordId] &&
-    !!match.confirmations[match.player2.discordId];
+  const p1Confirmed = entryDiscordIds(match.player1).some(id => match.confirmations[id]);
+  const p2Confirmed = entryDiscordIds(match.player2).some(id => match.confirmations[id]);
 
-  if (bothConfirmed) await confirmAndPropagate(found);
+  if (p1Confirmed && p2Confirmed) await confirmAndPropagate(found);
 
   saveState();
   res.json({ ok: true });
