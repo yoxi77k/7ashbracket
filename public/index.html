@@ -459,22 +459,68 @@
     renderBracket();
   }
 
+  function totalRegisteredCount(){
+    const format = state.matchFormat || 1;
+    return format === 1 ? state.players.length : (state.teams || []).reduce((sum, t) => sum + t.members.length, 0);
+  }
+
   function renderStats(){
-    el('statPlayers').textContent = state.players.length;
-    el('playerPill').textContent = `${state.players.length} player${state.players.length === 1 ? '' : 's'}`;
+    const total = totalRegisteredCount();
+    el('statPlayers').textContent = total;
+    el('playerPill').textContent = `${total} player${total === 1 ? '' : 's'}`;
     el('statRounds').textContent = state.rounds.length;
 
-    let confirmed = 0, total = 0;
+    let confirmed = 0, total2 = 0;
     state.rounds.forEach(r => r.matches.forEach(m => {
-      if(m.player1 && m.player2){ total++; if(m.status === 'confirmed') confirmed++; }
+      if(m.player1 && m.player2){ total2++; if(m.status === 'confirmed') confirmed++; }
     }));
-    el('statDone').textContent = `${confirmed}/${total || 0}`;
+    el('statDone').textContent = `${confirmed}/${total2 || 0}`;
   }
 
   function renderRegistration(){
+    const format = state.matchFormat || 1;
+    const totalRegistered = totalRegisteredCount();
+    const limitReached = !!state.maxPlayers && totalRegistered >= state.maxPlayers;
+
+    // Owner controls (limit + format) — shown the same way regardless of mode
+    const limitControls = el('ownerLimitControls');
+    if(owner && !state.bracketGenerated){
+      limitControls.style.display = 'block';
+      el('limitStatusNote').textContent = state.maxPlayers
+        ? `Current limit: ${state.maxPlayers} players (${totalRegistered}/${state.maxPlayers} registered)`
+        : `No limit (${totalRegistered} registered)`;
+
+      document.querySelectorAll('[data-format]').forEach(btn => {
+        btn.classList.toggle('active', Number(btn.dataset.format) === format);
+      });
+      el('formatStatusNote').textContent = format === 1
+        ? 'Current format: 1v1 (solo)'
+        : `Current format: ${format}v${format} — players create or join their own team`;
+    } else {
+      limitControls.style.display = 'none';
+    }
+
+    el('registerStatus').textContent = state.bracketGenerated
+      ? 'Closed — the bracket has been generated'
+      : limitReached
+        ? `Full — ${totalRegistered}/${state.maxPlayers} players`
+        : state.maxPlayers
+          ? `Open — ${totalRegistered}/${state.maxPlayers} players`
+          : 'Open — log in with Discord to join';
+
+    if(format === 1){
+      renderSoloRegistration(limitReached);
+    } else {
+      renderTeamRegistration(format, limitReached);
+    }
+  }
+
+  // ---- Solo (1v1) registration — unchanged from the original flow ----
+  function renderSoloRegistration(limitReached){
     const grid = el('playersGrid');
     grid.innerHTML = '';
     el('playersEmpty').style.display = state.players.length ? 'none' : 'block';
+    el('playersEmpty').textContent = 'No players registered yet.';
 
     state.players.forEach(p => {
       const isMine = discordUser && p.discordId === discordUser.id;
@@ -492,34 +538,6 @@
     grid.querySelectorAll('.del').forEach(btn => {
       btn.onclick = () => removePlayer(btn.dataset.id, btn.dataset.mine === '1');
     });
-
-    const limitReached = !!state.maxPlayers && state.players.length >= state.maxPlayers;
-
-    const limitControls = el('ownerLimitControls');
-    if(owner && !state.bracketGenerated){
-      limitControls.style.display = 'block';
-      el('limitStatusNote').textContent = state.maxPlayers
-        ? `Current limit: ${state.maxPlayers} players (${state.players.length}/${state.maxPlayers} registered)`
-        : `No limit (${state.players.length} registered)`;
-
-      const format = state.matchFormat || 1;
-      document.querySelectorAll('[data-format]').forEach(btn => {
-        btn.classList.toggle('active', Number(btn.dataset.format) === format);
-      });
-      el('formatStatusNote').textContent = format === 1
-        ? 'Current format: 1v1 (solo)'
-        : `Current format: ${format}v${format} (teams formed randomly when the bracket is generated)`;
-    } else {
-      limitControls.style.display = 'none';
-    }
-
-    el('registerStatus').textContent = state.bracketGenerated
-      ? 'Closed — the bracket has been generated'
-      : limitReached
-        ? `Full — ${state.players.length}/${state.maxPlayers} players`
-        : state.maxPlayers
-          ? `Open — ${state.players.length}/${state.maxPlayers} players`
-          : 'Open — log in with Discord to join';
 
     const gate = el('loginGate');
     if(state.bracketGenerated){
@@ -561,6 +579,113 @@
         showToast(err.message, true);
       }
     };
+  }
+
+  // ---- Team registration (2v2 / 3v3 / 4v4) — players create or join a team themselves ----
+  function renderTeamRegistration(format, limitReached){
+    const grid = el('playersGrid');
+    grid.innerHTML = '';
+    const teams = state.teams || [];
+    el('playersEmpty').style.display = teams.length ? 'none' : 'block';
+    el('playersEmpty').textContent = 'No teams yet.';
+
+    teams.forEach(team => {
+      const isMyTeam = discordUser && team.members.some(m => m.discordId === discordUser.id);
+      const card = document.createElement('div');
+      card.className = 'player-chip' + (isMyTeam ? ' mine' : '');
+      card.style.cssText = 'flex-direction:column; align-items:flex-start; padding:10px 14px; border-radius:16px; gap:6px; max-width:100%;';
+
+      const membersHTML = team.members.map(m => {
+        const canRemoveMember = owner || (discordUser && discordUser.id === m.discordId);
+        return `
+          <span style="display:inline-flex; align-items:center; gap:4px; margin:2px 8px 2px 0;">
+            <span class="avatar" style="width:20px;height:20px;font-size:.65rem;">${avatarHTML(m)}</span>
+            ${escapeHTML(m.name)}
+            ${canRemoveMember ? `<button class="del" data-team="${team.id}" data-discord="${m.discordId}" title="${(discordUser && discordUser.id === m.discordId) ? 'Leave team' : 'Remove member'}">✕</button>` : ''}
+          </span>
+        `;
+      }).join('');
+
+      card.innerHTML = `
+        <div style="font-weight:700;">${escapeHTML(team.name)} <span style="color:var(--text-2); font-weight:600;">(${team.members.length}/${format})</span></div>
+        <div style="display:flex; flex-wrap:wrap;">${membersHTML}</div>
+      `;
+      grid.appendChild(card);
+    });
+
+    grid.querySelectorAll('[data-team]').forEach(btn => {
+      btn.onclick = () => removeTeamMember(btn.dataset.team, btn.dataset.discord);
+    });
+
+    const gate = el('loginGate');
+    if(state.bracketGenerated){
+      gate.innerHTML = `<p>Registrations are closed, the bracket has already been generated.</p>`;
+      return;
+    }
+
+    if(!discordUser){
+      gate.innerHTML = discordConfigured
+        ? `<p>You must log in with Discord before you can create or join a team.</p><a href="/auth/discord" class="discord-btn" style="text-decoration:none; display:inline-flex; align-items:center;">💬 Login with Discord</a>`
+        : `<p>Discord login isn't configured on this server yet.</p>`;
+      return;
+    }
+
+    const myTeam = teams.find(t => t.members.some(m => m.discordId === discordUser.id));
+    if(myTeam){
+      gate.innerHTML = `<p>✅ You're in <strong>${escapeHTML(myTeam.name)}</strong> (${myTeam.members.length}/${format}).</p>`;
+      return;
+    }
+
+    if(limitReached){
+      gate.innerHTML = `<p>😕 Registrations are full (${state.maxPlayers} players max).</p>`;
+      return;
+    }
+
+    const openTeams = teams.filter(t => t.members.length < format);
+    const openTeamsHTML = openTeams.length
+      ? openTeams.map(t => `
+          <div style="display:flex; align-items:center; gap:8px; padding:8px; border:1px solid var(--panel-border); border-radius:10px; margin-bottom:6px;">
+            <div style="flex:1;">${escapeHTML(t.name)} — ${t.members.length}/${format}</div>
+            <button class="secondary" data-join="${t.id}">Join</button>
+          </div>
+        `).join('')
+      : `<div class="empty-note">No open teams yet — create one below!</div>`;
+
+    gate.innerHTML = `
+      <div style="width:100%;">
+        <div class="field-label">Create a new team</div>
+        <div class="register-row" style="margin-bottom:14px;">
+          <input type="text" id="teamNameInput" placeholder="Team name" maxlength="30" />
+          <button class="primary" id="createTeamBtn">Create team</button>
+        </div>
+        <div class="field-label">Or join an existing team</div>
+        ${openTeamsHTML}
+      </div>
+    `;
+
+    el('createTeamBtn').onclick = async () => {
+      const name = el('teamNameInput').value.trim();
+      if(!name){ showToast('Enter a team name.', true); return; }
+      try {
+        await api('/api/teams/create', { method: 'POST', body: JSON.stringify({ name }) });
+        await loadState();
+        showToast('Team created!');
+      } catch(err){
+        showToast(err.message, true);
+      }
+    };
+
+    document.querySelectorAll('[data-join]').forEach(btn => {
+      btn.onclick = async () => {
+        try {
+          await api('/api/teams/join', { method: 'POST', body: JSON.stringify({ teamId: btn.dataset.join }) });
+          await loadState();
+          showToast('Joined the team!');
+        } catch(err){
+          showToast(err.message, true);
+        }
+      };
+    });
   }
 
   function matchSlotHTML(entry, isWinner){
@@ -706,6 +831,19 @@
     }
   }
 
+  async function removeTeamMember(teamId, discordId){
+    const isMine = discordUser && discordUser.id === discordId;
+    const confirmMsg = isMine ? 'Leave your team?' : 'Remove this member from the team?';
+    if(!confirm(confirmMsg)) return;
+    try {
+      await api('/api/remove-team-member', { method: 'POST', body: JSON.stringify({ teamId, discordId }) });
+      await loadState();
+      showToast(isMine ? 'You left the team.' : 'Member removed');
+    } catch(err){
+      showToast(err.message, true);
+    }
+  }
+
   async function removePlayer(playerId, isMine){
     const confirmMsg = isMine ? 'Unregister from the tournament?' : 'Remove this player?';
     if(!confirm(confirmMsg)) return;
@@ -775,9 +913,10 @@
 
   async function setMatchFormat(format){
     try {
-      await api('/api/owner/set-match-format', { method: 'POST', body: JSON.stringify({ format }) });
+      const res = await api('/api/owner/set-match-format', { method: 'POST', body: JSON.stringify({ format }) });
       await loadState();
-      showToast(format === 1 ? 'Format set to 1v1' : `Format set to ${format}v${format}`);
+      const label = format === 1 ? '1v1' : `${format}v${format}`;
+      showToast(res.reset ? `Format set to ${label} — previous registrations were cleared` : `Format set to ${label}`);
     } catch(err){
       showToast(err.message, true);
     }
