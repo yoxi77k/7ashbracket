@@ -14,7 +14,14 @@ const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET || "";
 const DISCORD_REDIRECT_URI = process.env.DISCORD_REDIRECT_URI || "";
 const DISCORD_LOG_WEBHOOK_URL = process.env.DISCORD_LOG_WEBHOOK_URL || "";
 
+// --- Bot config for auto-created 1v1 ticket channels ---
+const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || "";
+const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID || "";
+const DISCORD_TICKET_CATEGORY_ID = process.env.DISCORD_TICKET_CATEGORY_ID || ""; // optional
+const DISCORD_MODERATOR_ROLE_ID = process.env.DISCORD_MODERATOR_ROLE_ID || ""; // optional but recommended
+
 const discordConfigured = !!(DISCORD_CLIENT_ID && DISCORD_CLIENT_SECRET && DISCORD_REDIRECT_URI);
+const ticketsConfigured = !!(DISCORD_BOT_TOKEN && DISCORD_GUILD_ID);
 
 const DATA_FILE = path.join(__dirname, "tournament-data.json");
 
@@ -55,6 +62,11 @@ function requireOwner(req, res, next) {
 }
 
 // ---------- Tournament state (persisted to disk) ----------
+// NOTE: state is saved to DATA_FILE on every mutation (saveState()) and
+// reloaded from disk at server startup (loadState()). This means the
+// player list and bracket already survive a page refresh (and a server
+// restart) — the client just re-fetches /api/state, which reflects
+// whatever is currently on disk. No change needed for that part.
 function defaultState() {
   return { players: [], bracketGenerated: false, rounds: [] };
 }
@@ -184,30 +196,25 @@ app.post("/api/register", (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- Owner login (requires an active Discord session first) ----------
-app.post("/api/owner/login", (req, res) => {
-  if (!req.session.discordUser) {
-    return res.status(401).json({ error: "Log in with Discord first." });
-  }
-  const { password } = req.body || {};
-  if (password !== OWNER_PASSWORD) {
-    return res.status(401).json({ error: "Incorrect password." });
-  }
-  req.session.isOwner = true;
-  res.json({ ok: true });
-});
-
-app.post("/api/owner/logout", (req, res) => {
-  req.session.isOwner = false;
-  res.json({ ok: true });
-});
-
-// ---------- Owner: manage players ----------
-app.post("/api/owner/delete-player", requireOwner, (req, res) => {
+// ---------- Remove a player: the player themselves, or the owner ----------
+app.post("/api/remove-player", (req, res) => {
   if (state.bracketGenerated) {
     return res.status(400).json({ error: "Reset the bracket before removing players." });
   }
+
   const { playerId } = req.body || {};
+  const player = state.players.find(p => p.id === playerId);
+  if (!player) {
+    return res.status(404).json({ error: "Player not found." });
+  }
+
+  const isSelf = req.session.discordUser && player.discordId === req.session.discordUser.id;
+  const isOwner = !!req.session.isOwner;
+
+  if (!isSelf && !isOwner) {
+    return res.status(403).json({ error: "You can only remove yourself." });
+  }
+
   state.players = state.players.filter(p => p.id !== playerId);
   saveState();
   res.json({ ok: true });
@@ -254,8 +261,102 @@ function confirmAndPropagate(found) {
   placeWinner(roundIndex, matchIndex, match.winner);
 }
 
+// ---------- Discord ticket channels (one per round-1 1v1 match) ----------
+const DISCORD_API = "https://discord.com/api/v10";
+const PERM_VIEW_CHANNEL = 1024n;
+const PERM_SEND_MESSAGES = 2048n;
+const PERM_READ_HISTORY = 65536n;
+const PERM_ALLOW_ALL = (PERM_VIEW_CHANNEL | PERM_SEND_MESSAGES | PERM_READ_HISTORY).toString();
+const PERM_DENY_VIEW = PERM_VIEW_CHANNEL.toString();
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function sanitizeChannelName(name) {
+  return String(name)
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // strip accents
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 45) || "player";
+}
+
+async function discordApi(endpoint, options = {}) {
+  const res = await fetch(`${DISCORD_API}${endpoint}`, {
+    ...options,
+    headers: {
+      Authorization: `Bot ${DISCORD_BOT_TOKEN}`,
+      "Content-Type": "application/json",
+      ...(options.headers || {})
+    }
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(body.message || `Discord API error (${res.status})`);
+  }
+  return body;
+}
+
+async function createTicketForMatch(p1, p2) {
+  const channelName = `${sanitizeChannelName(p1.name)}-vs-${sanitizeChannelName(p2.name)}`;
+
+  const permission_overwrites = [
+    { id: DISCORD_GUILD_ID, type: 0, deny: PERM_DENY_VIEW }, // @everyone (role id == guild id)
+    { id: p1.discordId, type: 1, allow: PERM_ALLOW_ALL },
+    { id: p2.discordId, type: 1, allow: PERM_ALLOW_ALL }
+  ];
+  if (DISCORD_MODERATOR_ROLE_ID) {
+    permission_overwrites.push({ id: DISCORD_MODERATOR_ROLE_ID, type: 0, allow: PERM_ALLOW_ALL });
+  }
+
+  const channel = await discordApi(`/guilds/${DISCORD_GUILD_ID}/channels`, {
+    method: "POST",
+    body: JSON.stringify({
+      name: channelName,
+      type: 0, // text channel
+      parent_id: DISCORD_TICKET_CATEGORY_ID || undefined,
+      permission_overwrites
+    })
+  });
+
+  const modPing = DISCORD_MODERATOR_ROLE_ID ? ` <@&${DISCORD_MODERATOR_ROLE_ID}>` : "";
+  await discordApi(`/channels/${channel.id}/messages`, {
+    method: "POST",
+    body: JSON.stringify({
+      content:
+        `🥊 **${p1.name}** vs **${p2.name}**\n` +
+        `<@${p1.discordId}> <@${p2.discordId}>${modPing}\n` +
+        `Ce salon est privé pour votre match. Un modérateur va vous rejoindre pour arbitrer.`
+    })
+  });
+
+  return channel;
+}
+
+async function createRound1Tickets(round1Matches) {
+  if (!ticketsConfigured) {
+    console.warn("⚠️  DISCORD_BOT_TOKEN / DISCORD_GUILD_ID missing — skipping ticket channel creation.");
+    return 0;
+  }
+
+  let created = 0;
+  for (const match of round1Matches) {
+    // Only create a ticket for real 1v1 matches (skip byes where one side is empty)
+    if (!match.player1 || !match.player2) continue;
+    try {
+      await createTicketForMatch(match.player1, match.player2);
+      created++;
+    } catch (err) {
+      console.error(`Failed to create ticket for match ${match.id}:`, err.message);
+    }
+    await sleep(400); // stay comfortably under Discord's rate limits
+  }
+  return created;
+}
+
 // ---------- Owner: generate / reset bracket ----------
-app.post("/api/owner/generate-bracket", requireOwner, (req, res) => {
+app.post("/api/owner/generate-bracket", requireOwner, async (req, res) => {
   if (state.players.length < 2) {
     return res.status(400).json({ error: "Need at least 2 players." });
   }
@@ -307,7 +408,17 @@ app.post("/api/owner/generate-bracket", requireOwner, (req, res) => {
 
   state.bracketGenerated = true;
   saveState();
-  res.json({ ok: true });
+
+  // Best-effort: create one private Discord channel per round-1 1v1 match.
+  // If this fails or isn't configured, the bracket itself is still generated.
+  let ticketsCreated = 0;
+  try {
+    ticketsCreated = await createRound1Tickets(round1Matches);
+  } catch (err) {
+    console.error("Ticket creation step failed:", err);
+  }
+
+  res.json({ ok: true, ticketsCreated });
 });
 
 app.post("/api/owner/reset-bracket", requireOwner, (req, res) => {
@@ -320,6 +431,24 @@ app.post("/api/owner/reset-bracket", requireOwner, (req, res) => {
 app.post("/api/owner/reset-all", requireOwner, (req, res) => {
   state = defaultState();
   saveState();
+  res.json({ ok: true });
+});
+
+// ---------- Owner login (requires an active Discord session first) ----------
+app.post("/api/owner/login", (req, res) => {
+  if (!req.session.discordUser) {
+    return res.status(401).json({ error: "Log in with Discord first." });
+  }
+  const { password } = req.body || {};
+  if (password !== OWNER_PASSWORD) {
+    return res.status(401).json({ error: "Incorrect password." });
+  }
+  req.session.isOwner = true;
+  res.json({ ok: true });
+});
+
+app.post("/api/owner/logout", (req, res) => {
+  req.session.isOwner = false;
   res.json({ ok: true });
 });
 
@@ -408,6 +537,9 @@ app.listen(PORT, () => {
   console.log(`Tournament server running on port ${PORT}`);
   if (!discordConfigured) {
     console.warn("⚠️  Discord OAuth is not configured (missing env vars).");
+  }
+  if (!ticketsConfigured) {
+    console.warn("⚠️  Discord ticket channels are not configured (missing DISCORD_BOT_TOKEN / DISCORD_GUILD_ID).");
   }
   if (OWNER_PASSWORD === "changeme") {
     console.warn("⚠️  OWNER_PASSWORD is not set — using the insecure default!");
