@@ -19,6 +19,7 @@ const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || "";
 const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID || "";
 const DISCORD_TICKET_CATEGORY_ID = process.env.DISCORD_TICKET_CATEGORY_ID || ""; // optional
 const DISCORD_MODERATOR_ROLE_ID = process.env.DISCORD_MODERATOR_ROLE_ID || ""; // optional but recommended
+const DISCORD_RESULTS_CHANNEL_ID = process.env.DISCORD_RESULTS_CHANNEL_ID || ""; // optional: shared "results" log channel
 
 const discordConfigured = !!(DISCORD_CLIENT_ID && DISCORD_CLIENT_SECRET && DISCORD_REDIRECT_URI);
 const ticketsConfigured = !!(DISCORD_BOT_TOKEN && DISCORD_GUILD_ID);
@@ -68,7 +69,15 @@ function requireOwner(req, res, next) {
 // restart) — the client just re-fetches /api/state, which reflects
 // whatever is currently on disk. No change needed for that part.
 function defaultState() {
-  return { players: [], teams: [], bracketGenerated: false, rounds: [], maxPlayers: null, matchFormat: 1, registrationOpen: false };
+  return {
+    players: [],
+    teams: [],
+    bracketGenerated: false,
+    rounds: [],
+    maxPlayers: null,
+    matchFormat: 1,
+    registrationOpen: false // registrations stay closed until the owner explicitly starts them
+  };
 }
 
 function loadState() {
@@ -83,28 +92,44 @@ function saveState() {
   fs.writeFileSync(DATA_FILE, JSON.stringify(state, null, 2));
 }
 
+// ---------- Team join codes ----------
+// Each team gets a short private code (shown only to its own members, and
+// to the owner) that other players type in to join instead of a public
+// "Join" button. Ambiguous characters (0/O, 1/I) are excluded.
+function generateTeamCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let code;
+  do {
+    code = Array.from({ length: 6 }, () => chars[crypto.randomInt(chars.length)]).join("");
+  } while (state.teams.some(t => t.code === code));
+  return code;
+}
+
 let state = loadState();
 if (state.maxPlayers === undefined) state.maxPlayers = null; // backward-compat with older save files
 if (!state.matchFormat) state.matchFormat = 1; // backward-compat: default to solo 1v1
 if (!Array.isArray(state.teams)) state.teams = []; // backward-compat with older save files
-if (state.registrationOpen === undefined) {
-  // Backward-compat: an already-running tournament (players/teams registered,
-  // or a bracket already generated) must not suddenly get locked out.
-  state.registrationOpen = state.bracketGenerated || state.players.length > 0 || state.teams.length > 0;
-}
+if (state.registrationOpen === undefined) state.registrationOpen = false; // backward-compat: must be explicitly started
+state.teams.forEach(t => { if (!t.code) t.code = generateTeamCode(); }); // backward-compat: teams from before the code system
 
 function totalRegisteredCount() {
   const format = state.matchFormat || 1;
   return format === 1 ? state.players.length : state.teams.reduce((sum, t) => sum + t.members.length, 0);
 }
 
-// Short, unambiguous code (no 0/O/1/I mix-ups) a team's creator shares with
-// teammates so they can join that specific team.
-function generateTeamCode() {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let code = "";
-  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
-  return code;
+// Returns a copy of state safe to send to a given request: team join codes
+// are stripped out for everyone except the team's own members and the owner.
+function publicStateFor(req) {
+  const cloned = JSON.parse(JSON.stringify(state));
+  const myId = req.session.discordUser ? req.session.discordUser.id : null;
+  const isOwner = !!req.session.isOwner;
+  if (Array.isArray(cloned.teams)) {
+    cloned.teams.forEach(t => {
+      const isMine = myId && t.members.some(m => m.discordId === myId);
+      if (!isMine && !isOwner) delete t.code;
+    });
+  }
+  return cloned;
 }
 
 // ---------- Discord OAuth2 ----------
@@ -188,21 +213,19 @@ app.get("/api/session", (req, res) => {
   });
 });
 
+// Disconnects the current Discord session (and owner mode, since owner
+// access requires being logged in with Discord). Existing registrations
+// tied to this Discord id are untouched — logging back in with the same
+// account will still show as registered.
+app.post("/api/auth/logout", (req, res) => {
+  req.session.discordUser = null;
+  req.session.isOwner = false;
+  res.json({ ok: true });
+});
+
 // ---------- Tournament state ----------
 app.get("/api/state", (req, res) => {
-  const myId = req.session.discordUser ? req.session.discordUser.id : null;
-  const isOwner = !!req.session.isOwner;
-
-  // A team's join code is only sent to its own members (or the owner) —
-  // everyone else gets the team without that field.
-  const sanitizedTeams = state.teams.map(t => {
-    const isMember = myId && t.members.some(m => m.discordId === myId);
-    if (isOwner || isMember) return t;
-    const { code, ...rest } = t;
-    return rest;
-  });
-
-  res.json({ ...state, teams: sanitizedTeams });
+  res.json(publicStateFor(req));
 });
 
 // ---------- Registration (solo, 1v1 mode only) ----------
@@ -210,11 +233,11 @@ app.post("/api/register", (req, res) => {
   if (!req.session.discordUser) {
     return res.status(401).json({ error: "Log in with Discord first." });
   }
+  if (!state.registrationOpen) {
+    return res.status(400).json({ error: "Registrations haven't started yet." });
+  }
   if ((state.matchFormat || 1) !== 1) {
     return res.status(400).json({ error: "Team mode is active — create or join a team instead." });
-  }
-  if (!state.registrationOpen) {
-    return res.status(400).json({ error: "Registration hasn't started yet." });
   }
   if (state.bracketGenerated) {
     return res.status(400).json({ error: "Registrations are closed." });
@@ -267,16 +290,18 @@ app.post("/api/remove-player", (req, res) => {
 });
 
 // ---------- Team registration (2v2 / 3v3 / 4v4) ----------
+// A player creates a team and receives a private join code. They share
+// that code with teammates, who use it (not a public list) to join.
 app.post("/api/teams/create", (req, res) => {
   if (!req.session.discordUser) {
     return res.status(401).json({ error: "Log in with Discord first." });
   }
+  if (!state.registrationOpen) {
+    return res.status(400).json({ error: "Registrations haven't started yet." });
+  }
   const format = state.matchFormat || 1;
   if (format === 1) {
     return res.status(400).json({ error: "Solo mode is active — register directly instead." });
-  }
-  if (!state.registrationOpen) {
-    return res.status(400).json({ error: "Registration hasn't started yet." });
   }
   if (state.bracketGenerated) {
     return res.status(400).json({ error: "Registrations are closed." });
@@ -295,8 +320,7 @@ app.post("/api/teams/create", (req, res) => {
     return res.status(400).json({ error: "Enter a team name." });
   }
 
-  let code;
-  do { code = generateTeamCode(); } while (state.teams.some(t => t.code === code));
+  const code = generateTeamCode();
 
   state.teams.push({
     id: crypto.randomUUID(),
@@ -314,17 +338,16 @@ app.post("/api/teams/create", (req, res) => {
   res.json({ ok: true, code });
 });
 
-// Join a team using the private code its creator shares (not by browsing a public list).
 app.post("/api/teams/join", (req, res) => {
   if (!req.session.discordUser) {
     return res.status(401).json({ error: "Log in with Discord first." });
   }
+  if (!state.registrationOpen) {
+    return res.status(400).json({ error: "Registrations haven't started yet." });
+  }
   const format = state.matchFormat || 1;
   if (format === 1) {
     return res.status(400).json({ error: "Solo mode is active — register directly instead." });
-  }
-  if (!state.registrationOpen) {
-    return res.status(400).json({ error: "Registration hasn't started yet." });
   }
   if (state.bracketGenerated) {
     return res.status(400).json({ error: "Registrations are closed." });
@@ -339,9 +362,13 @@ app.post("/api/teams/join", (req, res) => {
   }
 
   const code = String((req.body || {}).code || "").trim().toUpperCase();
+  if (!code) {
+    return res.status(400).json({ error: "Enter a team code." });
+  }
+
   const team = state.teams.find(t => t.code === code);
   if (!team) {
-    return res.status(404).json({ error: "Invalid team code." });
+    return res.status(404).json({ error: "No team found with that code." });
   }
   if (team.members.length >= format) {
     return res.status(400).json({ error: "This team is already full." });
@@ -355,7 +382,7 @@ app.post("/api/teams/join", (req, res) => {
   });
 
   saveState();
-  res.json({ ok: true });
+  res.json({ ok: true, teamName: team.name });
 });
 
 // Remove a team member: the member themselves (leave), or the owner.
@@ -387,7 +414,12 @@ app.post("/api/remove-team-member", (req, res) => {
 });
 
 // ---------- Owner: set a registration cap (8/16/32/64/128/custom, or none) ----------
+// Locked once registrations have started — reset everything to change it.
 app.post("/api/owner/set-max-players", requireOwner, (req, res) => {
+  if (state.registrationOpen) {
+    return res.status(400).json({ error: "Registrations already started — reset everything to change the limit." });
+  }
+
   let { maxPlayers } = req.body || {};
 
   if (maxPlayers === null || maxPlayers === undefined || maxPlayers === 0 || maxPlayers === "") {
@@ -411,35 +443,51 @@ app.post("/api/owner/set-max-players", requireOwner, (req, res) => {
 });
 
 // ---------- Owner: set the match format (1v1 / 2v2 / 3v3 / 4v4) ----------
-// Only allowed during setup, before registration has started.
+// Switching format changes what "registered" means (solo players vs teams),
+// so any existing registrations are cleared to avoid a mixed, invalid state.
+// Locked once registrations have started — reset everything to change it.
 app.post("/api/owner/set-match-format", requireOwner, (req, res) => {
   if (state.bracketGenerated) {
     return res.status(400).json({ error: "Reset the bracket before changing the match format." });
   }
   if (state.registrationOpen) {
-    return res.status(400).json({ error: "Registration has already started — reset everything to change the format." });
+    return res.status(400).json({ error: "Registrations already started — reset everything to change the format." });
   }
   const format = Number((req.body || {}).format);
   if (![1, 2, 3, 4].includes(format)) {
     return res.status(400).json({ error: "Format must be 1, 2, 3, or 4 (players per team)." });
   }
 
+  let reset = false;
+  if (format !== state.matchFormat) {
+    if (state.players.length > 0 || state.teams.length > 0) reset = true;
+    state.players = [];
+    state.teams = [];
+  }
+
   state.matchFormat = format;
   saveState();
-  res.json({ ok: true, matchFormat: format });
+  res.json({ ok: true, matchFormat: format, reset });
 });
 
-// ---------- Owner: open registration (locks in the format chosen during setup) ----------
+// ---------- Owner: start registrations ----------
+// Requires the format (always set, defaults to 1v1) and a numeric player
+// limit to be chosen first. Once started, format/limit are locked until
+// "Reset everything" is used.
 app.post("/api/owner/start-registration", requireOwner, (req, res) => {
   if (state.bracketGenerated) {
     return res.status(400).json({ error: "The bracket has already been generated." });
   }
   if (state.registrationOpen) {
-    return res.status(400).json({ error: "Registration is already open." });
+    return res.status(400).json({ error: "Registrations are already open." });
   }
+  if (!state.maxPlayers) {
+    return res.status(400).json({ error: "Set a player limit before starting registrations." });
+  }
+
   state.registrationOpen = true;
   saveState();
-  res.json({ ok: true, matchFormat: state.matchFormat, maxPlayers: state.maxPlayers });
+  res.json({ ok: true });
 });
 
 // ---------- Bracket helpers ----------
@@ -519,6 +567,7 @@ const PERM_VIEW_CHANNEL = 1024n;
 const PERM_SEND_MESSAGES = 2048n;
 const PERM_READ_HISTORY = 65536n;
 const PERM_ALLOW_ALL = (PERM_VIEW_CHANNEL | PERM_SEND_MESSAGES | PERM_READ_HISTORY).toString();
+const PERM_VIEW_ONLY = (PERM_VIEW_CHANNEL | PERM_READ_HISTORY).toString(); // can see history, can't post — used to "close" a finished ticket
 const PERM_DENY_VIEW = PERM_VIEW_CHANNEL.toString();
 
 function sleep(ms) {
@@ -621,9 +670,13 @@ async function createTicketsForReadyMatches(matches) {
   return created;
 }
 
-// Posts the result in English in the match's ticket channel and renames
-// it to flag it as finished. Best-effort — silently no-ops if there's no
-// channel (e.g. Discord tickets aren't configured).
+// Posts the result in the match's ticket channel, then "closes" that
+// ticket: renames it to flag it as finished and strips the two players'
+// permission down to view-only (they can still read the history, but
+// can't post anymore). Moderators keep full access. Also logs the result
+// to the shared results channel if one is configured. Best-effort —
+// silently no-ops if there's no channel (e.g. Discord tickets aren't
+// configured).
 async function announceMatchResult(match) {
   if (!ticketsConfigured || !match.channelId) return;
 
@@ -632,15 +685,47 @@ async function announceMatchResult(match) {
   await discordApi(`/channels/${match.channelId}/messages`, {
     method: "POST",
     body: JSON.stringify({
-      content: `🏆 **${match.winner.name}** win\n💀 **${loser.name}** lost`
+      content: `🏆 **${match.winner.name}** won\n💀 **${loser.name}** lost`
     })
   });
 
   const base = `${sanitizeChannelName(match.player1.name)}-vs-${sanitizeChannelName(match.player2.name)}`;
+  const allDiscordIds = [...entryDiscordIds(match.player1), ...entryDiscordIds(match.player2)];
+  const permission_overwrites = [
+    { id: DISCORD_GUILD_ID, type: 0, deny: PERM_DENY_VIEW }, // @everyone
+    ...allDiscordIds.map(discordId => ({ id: discordId, type: 1, allow: PERM_VIEW_ONLY, deny: PERM_SEND_MESSAGES.toString() }))
+  ];
+  if (DISCORD_MODERATOR_ROLE_ID) {
+    permission_overwrites.push({ id: DISCORD_MODERATOR_ROLE_ID, type: 0, allow: PERM_ALLOW_ALL });
+  }
+
   await discordApi(`/channels/${match.channelId}`, {
     method: "PATCH",
-    body: JSON.stringify({ name: `${base}-finished`.slice(0, 95) })
+    body: JSON.stringify({
+      name: `${base}-finished`.slice(0, 95),
+      permission_overwrites
+    })
   });
+
+  await postToResultsChannel(match.winner.name, loser.name);
+}
+
+// Logs "Winner won, Loser lost" to a single shared channel (set via
+// DISCORD_RESULTS_CHANNEL_ID) so anyone can follow the tournament without
+// needing access to the private per-match ticket channels. Optional and
+// best-effort — no-ops if not configured.
+async function postToResultsChannel(winnerName, loserName) {
+  if (!ticketsConfigured || !DISCORD_RESULTS_CHANNEL_ID) return;
+  try {
+    await discordApi(`/channels/${DISCORD_RESULTS_CHANNEL_ID}/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        content: `🏆 **${winnerName}** won, **${loserName}** lost`
+      })
+    });
+  } catch (err) {
+    console.error("Failed to post to results channel:", err.message);
+  }
 }
 
 // ---------- Owner: generate / reset bracket ----------
