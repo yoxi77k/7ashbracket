@@ -542,13 +542,25 @@ async function confirmAndPropagate(found) {
   match.status = "confirmed";
   match.winner = match.reportedWinner === match.player1.id ? match.player1 : match.player2;
   placeWinner(roundIndex, matchIndex, match.winner);
+  const loser = match.winner.id === match.player1.id ? match.player2 : match.player1;
 
-  // Best-effort Discord side-effects: announce the result in the match's
-  // ticket channel, rename it, and open a new ticket for the next round
-  // once both of its players are known. Never blocks the API response.
+  // Best-effort Discord side-effects — never block the API response, and
+  // never let one step's failure stop the others (e.g. a missing ticket
+  // channel must not prevent the shared results channel from getting the
+  // result, and vice versa).
   try {
-    await announceMatchResult(match);
+    await closeMatchTicket(match);
+  } catch (err) {
+    console.error("Failed to close the match ticket:", err.message);
+  }
 
+  try {
+    await postToResultsChannel(match.winner.name, loser.name);
+  } catch (err) {
+    console.error("Failed to post to the results channel:", err.message);
+  }
+
+  try {
     const nextRound = state.rounds[roundIndex + 1];
     if (nextRound) {
       const nextMatch = nextRound.matches[Math.floor(matchIndex / 2)];
@@ -557,7 +569,7 @@ async function confirmAndPropagate(found) {
       }
     }
   } catch (err) {
-    console.error("Discord post-match step failed:", err.message);
+    console.error("Failed to create the next-round ticket:", err.message);
   }
 }
 
@@ -670,14 +682,13 @@ async function createTicketsForReadyMatches(matches) {
   return created;
 }
 
-// Posts the result in the match's ticket channel, then "closes" that
-// ticket: renames it to flag it as finished and strips the two players'
-// permission down to view-only (they can still read the history, but
-// can't post anymore). Moderators keep full access. Also logs the result
-// to the shared results channel if one is configured. Best-effort —
-// silently no-ops if there's no channel (e.g. Discord tickets aren't
-// configured).
-async function announceMatchResult(match) {
+// Posts the result in the match's own ticket channel, then "closes" it:
+// renames it to flag it as finished and strips the two players' permission
+// down to view-only (they can still read the history, but can't post
+// anymore). Moderators keep full access. Best-effort — silently no-ops if
+// there's no ticket channel for this match (e.g. Discord tickets aren't
+// configured, or the channel failed to get created earlier).
+async function closeMatchTicket(match) {
   if (!ticketsConfigured || !match.channelId) return;
 
   const loser = match.winner.id === match.player1.id ? match.player2 : match.player1;
@@ -706,26 +717,22 @@ async function announceMatchResult(match) {
       permission_overwrites
     })
   });
-
-  await postToResultsChannel(match.winner.name, loser.name);
 }
 
 // Logs "Winner won, Loser lost" to a single shared channel (set via
 // DISCORD_RESULTS_CHANNEL_ID) so anyone can follow the tournament without
-// needing access to the private per-match ticket channels. Optional and
+// needing access to the private per-match ticket channels. Only needs the
+// bot token and that one channel id — completely independent of whether a
+// per-match ticket channel exists or DISCORD_GUILD_ID is set. Optional and
 // best-effort — no-ops if not configured.
 async function postToResultsChannel(winnerName, loserName) {
-  if (!ticketsConfigured || !DISCORD_RESULTS_CHANNEL_ID) return;
-  try {
-    await discordApi(`/channels/${DISCORD_RESULTS_CHANNEL_ID}/messages`, {
-      method: "POST",
-      body: JSON.stringify({
-        content: `🏆 **${winnerName}** won, **${loserName}** lost`
-      })
-    });
-  } catch (err) {
-    console.error("Failed to post to results channel:", err.message);
-  }
+  if (!DISCORD_BOT_TOKEN || !DISCORD_RESULTS_CHANNEL_ID) return;
+  await discordApi(`/channels/${DISCORD_RESULTS_CHANNEL_ID}/messages`, {
+    method: "POST",
+    body: JSON.stringify({
+      content: `🏆 **${winnerName}** won, **${loserName}** lost`
+    })
+  });
 }
 
 // ---------- Owner: generate / reset bracket ----------
