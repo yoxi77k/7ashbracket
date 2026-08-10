@@ -105,10 +105,15 @@
   .pill .dot{ width:7px; height:7px; border-radius:50%; background:var(--cyan); box-shadow:0 0 8px var(--cyan); }
 
   .discord-pill{
-    display:flex; align-items:center; gap:8px; padding:6px 14px 6px 6px; border-radius:999px;
+    display:flex; align-items:center; gap:8px; padding:6px 8px 6px 6px; border-radius:999px;
     background:rgba(88,101,242,.12); border:1px solid rgba(88,101,242,.4); font-size:.82rem; font-weight:700;
   }
   .discord-pill img{ width:24px; height:24px; border-radius:50%; }
+  .discord-logout{
+    background:rgba(255,255,255,.08); color:var(--text-1); border:none; border-radius:50%;
+    width:20px; height:20px; font-size:.68rem; line-height:1; display:inline-flex; align-items:center; justify-content:center; padding:0; flex-shrink:0;
+  }
+  .discord-logout:hover{ background:rgba(255,95,109,.25); color:var(--red); }
 
   button{ border:none; font-family:inherit; cursor:pointer; transition:transform .15s ease, box-shadow .15s ease, opacity .15s ease; }
   button:active{ transform:translateY(1px); }
@@ -148,7 +153,8 @@
     background:linear-gradient(90deg,var(--violet),var(--cyan) 55%,var(--pink));
     -webkit-background-clip:text; -webkit-text-fill-color:transparent;
   }
-  .hero-sub{ color:var(--text-1); font-size:.98rem; margin:0 0 30px; }
+  .hero-sub{ color:var(--text-1); font-size:.98rem; margin:0 0 6px; }
+  .credit-line{ color:var(--text-2); font-size:.7rem; letter-spacing:1.5px; font-weight:700; text-transform:uppercase; margin:0 0 30px; }
 
   .stats-row{ display:flex; justify-content:center; gap:14px; flex-wrap:wrap; }
   .stat{ background:var(--panel); border:1px solid var(--panel-border); border-radius:16px; padding:14px 24px; min-width:100px; }
@@ -198,6 +204,10 @@
   .player-chip .del:hover{ color:var(--red); }
   .empty-note{ color:var(--text-2); font-size:.85rem; margin-top:10px; }
 
+  .team-code-row{ font-size:.75rem; color:var(--text-2); margin-top:2px; display:flex; align-items:center; gap:8px; padding-left:38px; }
+  .team-code-row strong{ letter-spacing:2px; color:var(--gold); font-family:'Orbitron',sans-serif; }
+  .team-code-row button{ padding:3px 10px; font-size:.68rem; border-radius:8px; }
+
   /* Bracket */
   .bracket-scroll{ display:flex; gap:20px; overflow-x:auto; padding-bottom:10px; }
   .round-col{ min-width:260px; flex:1 0 260px; display:flex; flex-direction:column; gap:16px; }
@@ -240,6 +250,12 @@
   .owner-mini button{ padding:7px 10px; font-size:.72rem; border-radius:8px; }
 
   .bracket-controls{ display:flex; gap:10px; flex-wrap:wrap; margin-top:14px; }
+
+  /* Owner setup panel (format + limit + start) */
+  .setup-panel{ margin:14px 0; padding:14px; border:1px solid var(--panel-border); border-radius:14px; background:rgba(255,255,255,.03); }
+  .setup-panel .intro{ margin:0 0 14px; color:var(--text-2); font-size:.8rem; }
+  .setup-row{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .setup-start-row{ margin-top:16px; padding-top:14px; border-top:1px solid var(--panel-border); display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
 
   /* Modals */
   .modal{
@@ -301,6 +317,7 @@
     <div class="eyebrow">COMMUNITY EVENT • FAN PROJECT</div>
     <h1>The community<br><span class="grad">tournament</span></h1>
     <p class="hero-sub">Log in with Discord, register, and confirm your results together.</p>
+    <p class="credit-line">Made by viday for 7ash</p>
     <div class="stats-row">
       <div class="stat"><span id="statPlayers">0</span><label>PLAYERS</label></div>
       <div class="stat"><span id="statRounds">0</span><label>ROUNDS</label></div>
@@ -311,23 +328,23 @@
   <section class="section" id="registerSection">
     <div class="section-head">
       <h2>📝 Registration</h2>
-      <p id="registerStatus">Open — log in with Discord to join</p>
+      <p id="registerStatus">Not open yet</p>
     </div>
     <div class="panel">
-      <div class="login-gate" id="loginGate"></div>
-      <div id="ownerLimitControls" style="display:none; margin:14px 0; padding:14px; border:1px solid var(--panel-border); border-radius:14px; background:rgba(255,255,255,.03);">
-        <div id="formatSetupBlock">
-          <div class="field-label">Match format</div>
-          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-            <button class="ghost" data-format="1">1v1</button>
-            <button class="ghost" data-format="2">2v2</button>
-            <button class="ghost" data-format="3">3v3</button>
-            <button class="ghost" data-format="4">4v4</button>
-          </div>
+      <div id="ownerLimitControls" class="setup-panel" style="display:none;">
+        <p class="intro">Choose the format, then a player limit — registrations stay closed until you start them. Both lock once registrations are open.</p>
+
+        <div class="field-label">Match format</div>
+        <div class="setup-row">
+          <button class="ghost" data-format="1">1v1</button>
+          <button class="ghost" data-format="2">2v2</button>
+          <button class="ghost" data-format="3">3v3</button>
+          <button class="ghost" data-format="4">4v4</button>
         </div>
-        <div class="empty-note" id="formatStatusNote" style="margin-top:8px;"></div>
+        <div class="empty-note" id="formatStatusNote"></div>
+
         <div class="field-label" style="margin-top:14px;">Registration limit</div>
-        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+        <div class="setup-row">
           <button class="ghost" data-limit="8">8</button>
           <button class="ghost" data-limit="16">16</button>
           <button class="ghost" data-limit="32">32</button>
@@ -337,9 +354,14 @@
           <button class="secondary" id="setCustomLimitBtn">Set</button>
           <button class="ghost" id="clearLimitBtn">No limit</button>
         </div>
-        <div class="empty-note" id="limitStatusNote" style="margin-top:8px;"></div>
-        <button class="primary" id="startRegistrationBtn" style="margin-top:14px; display:none;">🚀 Start registration</button>
+        <div class="empty-note" id="limitStatusNote"></div>
+
+        <div class="setup-start-row">
+          <button class="primary" id="startRegistrationBtn">🚀 Start registration</button>
+          <div class="empty-note" id="registrationLockedNote" style="display:none;">🔒 Registrations are open — reset everything to change the format or limit.</div>
+        </div>
       </div>
+      <div class="login-gate" id="loginGate"></div>
       <div class="players-grid" id="playersGrid"></div>
       <div class="empty-note" id="playersEmpty">No players registered yet.</div>
     </div>
@@ -385,7 +407,7 @@
   let owner = false;
   let discordUser = null;
   let discordConfigured = true;
-  let state = { players: [], bracketGenerated: false, rounds: [] };
+  let state = { players: [], teams: [], bracketGenerated: false, rounds: [], maxPlayers: null, matchFormat: 1, registrationOpen: false };
 
   const el = (id) => document.getElementById(id);
 
@@ -414,6 +436,17 @@
     const div = document.createElement('div');
     div.textContent = str;
     return div.innerHTML;
+  }
+
+  function copyToClipboard(text){
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(
+        () => showToast('Code copied!'),
+        () => showToast(`Copy it manually: ${text}`, true)
+      );
+    } else {
+      showToast(`Copy it manually: ${text}`, true);
+    }
   }
 
   function avatarHTML(player){
@@ -446,8 +479,22 @@
         <div class="discord-pill">
           <img src="${discordUser.avatarUrl}" alt="" />
           <span>${escapeHTML(discordUser.username)}</span>
+          <button class="discord-logout" id="discordLogoutBtn" title="Log out of Discord">✕</button>
         </div>
       `;
+      el('discordLogoutBtn').onclick = async () => {
+        if(!confirm('Log out of Discord?')) return;
+        try {
+          await api('/api/auth/logout', { method: 'POST' });
+          discordUser = null;
+          owner = false;
+          renderDiscordArea();
+          await loadState();
+          showToast('Logged out of Discord');
+        } catch(err){
+          showToast(err.message, true);
+        }
+      };
     } else {
       area.innerHTML = `<a href="/auth/discord" class="discord-btn" style="text-decoration:none; display:inline-flex; align-items:center;">💬 Login with Discord</a>`;
     }
@@ -480,69 +527,70 @@
     el('statDone').textContent = `${confirmed}/${total2 || 0}`;
   }
 
+  // Owner-only setup panel: pick format + limit, then start registrations.
+  // Everything locks once registrationOpen (or the bracket) is set.
+  function renderOwnerSetupPanel(format, started){
+    const panel = el('ownerLimitControls');
+    if(!owner || state.bracketGenerated){
+      panel.style.display = 'none';
+      return;
+    }
+    panel.style.display = 'block';
+
+    el('limitStatusNote').textContent = state.maxPlayers
+      ? `Current limit: ${state.maxPlayers} players (${totalRegisteredCount()}/${state.maxPlayers} registered)`
+      : 'No limit set yet — pick one to enable "Start registration".';
+
+    document.querySelectorAll('[data-format]').forEach(btn => {
+      btn.classList.toggle('active', Number(btn.dataset.format) === format);
+      btn.disabled = started;
+    });
+    el('formatStatusNote').textContent = format === 1
+      ? 'Current format: 1v1 (solo)'
+      : `Current format: ${format}v${format} — players create or join a team with a code`;
+
+    document.querySelectorAll('[data-limit]').forEach(btn => btn.disabled = started);
+    el('customLimitInput').disabled = started;
+    el('setCustomLimitBtn').disabled = started;
+    el('clearLimitBtn').disabled = started;
+
+    const startBtn = el('startRegistrationBtn');
+    startBtn.style.display = started ? 'none' : 'inline-flex';
+    startBtn.disabled = !state.maxPlayers;
+    startBtn.title = state.maxPlayers ? '' : 'Set a player limit first';
+
+    el('registrationLockedNote').style.display = started ? 'block' : 'none';
+  }
+
   function renderRegistration(){
     const format = state.matchFormat || 1;
+    const started = !!state.registrationOpen;
     const totalRegistered = totalRegisteredCount();
     const limitReached = !!state.maxPlayers && totalRegistered >= state.maxPlayers;
 
-    // Owner setup controls (format + limit + Start button)
-    const limitControls = el('ownerLimitControls');
-    if(owner && !state.bracketGenerated){
-      limitControls.style.display = 'block';
+    renderOwnerSetupPanel(format, started);
 
-      if(state.registrationOpen){
-        // Format is locked in once registration has started
-        el('formatSetupBlock').style.display = 'none';
-        el('formatStatusNote').textContent = format === 1
-          ? 'Format: 1v1 (solo) — locked in, registration is open'
-          : `Format: ${format}v${format} — locked in, registration is open`;
-        el('startRegistrationBtn').style.display = 'none';
-      } else {
-        el('formatSetupBlock').style.display = 'block';
-        document.querySelectorAll('[data-format]').forEach(btn => {
-          btn.classList.toggle('active', Number(btn.dataset.format) === format);
-        });
-        el('formatStatusNote').textContent = format === 1
-          ? 'Format: 1v1 (solo) — choose a format, then start registration'
-          : `Format: ${format}v${format} — players will create/join their own team`;
-        el('startRegistrationBtn').style.display = 'inline-block';
-      }
-
-      el('limitStatusNote').textContent = state.maxPlayers
-        ? `Current limit: ${state.maxPlayers} players (${totalRegistered}/${state.maxPlayers} registered)`
-        : `No limit (${totalRegistered} registered)`;
+    if(state.bracketGenerated){
+      el('registerStatus').textContent = 'Closed — the bracket has been generated';
+    } else if(!started){
+      el('registerStatus').textContent = 'Not open yet — waiting for the owner to start registrations';
+    } else if(limitReached){
+      el('registerStatus').textContent = `Full — ${totalRegistered}/${state.maxPlayers} players`;
+    } else if(state.maxPlayers){
+      el('registerStatus').textContent = `Open — ${totalRegistered}/${state.maxPlayers} players`;
     } else {
-      limitControls.style.display = 'none';
+      el('registerStatus').textContent = 'Open — log in with Discord to join';
     }
-
-    if(!state.bracketGenerated && !state.registrationOpen){
-      el('registerStatus').textContent = owner ? 'Not started — configure the tournament above' : 'Not started yet';
-      el('playersEmpty').style.display = 'block';
-      el('playersEmpty').textContent = 'Registration hasn\'t started yet.';
-      el('playersGrid').innerHTML = '';
-      el('loginGate').innerHTML = owner
-        ? `<p>Choose a format and (optionally) a player limit above, then click <strong>Start registration</strong> to open sign-ups.</p>`
-        : `<p>⏳ The owner hasn't opened registration yet — check back soon.</p>`;
-      return;
-    }
-
-    el('registerStatus').textContent = state.bracketGenerated
-      ? 'Closed — the bracket has been generated'
-      : limitReached
-        ? `Full — ${totalRegistered}/${state.maxPlayers} players`
-        : state.maxPlayers
-          ? `Open — ${totalRegistered}/${state.maxPlayers} players`
-          : 'Open — log in with Discord to join';
 
     if(format === 1){
-      renderSoloRegistration(limitReached);
+      renderSoloRegistration(limitReached, started);
     } else {
-      renderTeamRegistration(format, limitReached);
+      renderTeamRegistration(format, limitReached, started);
     }
   }
 
-  // ---- Solo (1v1) registration — unchanged from the original flow ----
-  function renderSoloRegistration(limitReached){
+  // ---- Solo (1v1) registration ----
+  function renderSoloRegistration(limitReached, started){
     const grid = el('playersGrid');
     grid.innerHTML = '';
     el('playersEmpty').style.display = state.players.length ? 'none' : 'block';
@@ -566,8 +614,14 @@
     });
 
     const gate = el('loginGate');
+
     if(state.bracketGenerated){
       gate.innerHTML = `<p>Registrations are closed, the bracket has already been generated.</p>`;
+      return;
+    }
+
+    if(!started){
+      gate.innerHTML = `<p>⏳ Registrations haven't started yet — waiting for the owner.</p>`;
       return;
     }
 
@@ -607,8 +661,8 @@
     };
   }
 
-  // ---- Team registration (2v2 / 3v3 / 4v4) — players create or join a team themselves ----
-  function renderTeamRegistration(format, limitReached){
+  // ---- Team registration (2v2 / 3v3 / 4v4) — join is by private code, not a public list ----
+  function renderTeamRegistration(format, limitReached, started){
     const grid = el('playersGrid');
     grid.innerHTML = '';
     const teams = state.teams || [];
@@ -632,10 +686,11 @@
         `;
       }).join('');
 
-      // team.code is only present in the API response for the team's own
-      // members or the owner (see server-side sanitization of /api/state).
+      // The join code is only present in the data we received if this
+      // user is a member of the team (or is the owner) — see server-side
+      // publicStateFor(). It's never exposed to other players.
       const codeHTML = team.code
-        ? `<div style="font-size:.72rem; color:var(--text-2);">Code: <strong style="letter-spacing:1.5px; color:var(--cyan);">${escapeHTML(team.code)}</strong></div>`
+        ? `<div class="team-code-row">Code: <strong>${escapeHTML(team.code)}</strong> <button class="secondary" data-copy-code="${escapeHTML(team.code)}">Copy</button></div>`
         : '';
 
       card.innerHTML = `
@@ -649,10 +704,19 @@
     grid.querySelectorAll('[data-team]').forEach(btn => {
       btn.onclick = () => removeTeamMember(btn.dataset.team, btn.dataset.discord);
     });
+    grid.querySelectorAll('[data-copy-code]').forEach(btn => {
+      btn.onclick = () => copyToClipboard(btn.dataset.copyCode);
+    });
 
     const gate = el('loginGate');
+
     if(state.bracketGenerated){
       gate.innerHTML = `<p>Registrations are closed, the bracket has already been generated.</p>`;
+      return;
+    }
+
+    if(!started){
+      gate.innerHTML = `<p>⏳ Registrations haven't started yet — waiting for the owner.</p>`;
       return;
     }
 
@@ -665,12 +729,7 @@
 
     const myTeam = teams.find(t => t.members.some(m => m.discordId === discordUser.id));
     if(myTeam){
-      gate.innerHTML = `
-        <div>
-          <p style="margin-bottom:6px;">✅ You're in <strong>${escapeHTML(myTeam.name)}</strong> (${myTeam.members.length}/${format}).</p>
-          ${myTeam.code ? `<p>Share this code with your teammates so they can join: <strong style="letter-spacing:2px; font-size:1.15rem; color:var(--cyan);">${escapeHTML(myTeam.code)}</strong></p>` : ''}
-        </div>
-      `;
+      gate.innerHTML = `<p>✅ You're in <strong>${escapeHTML(myTeam.name)}</strong> (${myTeam.members.length}/${format}). Share your team's code (shown above) with your teammates so they can join.</p>`;
       return;
     }
 
@@ -688,8 +747,8 @@
         </div>
         <div class="field-label">Or join a team with its code</div>
         <div class="register-row">
-          <input type="text" id="teamCodeInput" placeholder="Enter team code" maxlength="10" style="text-transform:uppercase; letter-spacing:1.5px;" />
-          <button class="secondary" id="joinTeamBtn">Join</button>
+          <input type="text" id="teamCodeInput" placeholder="Enter team code" maxlength="8" style="text-transform:uppercase;" />
+          <button class="secondary" id="joinTeamBtn">Join team</button>
         </div>
       </div>
     `;
@@ -698,9 +757,9 @@
       const name = el('teamNameInput').value.trim();
       if(!name){ showToast('Enter a team name.', true); return; }
       try {
-        await api('/api/teams/create', { method: 'POST', body: JSON.stringify({ name }) });
+        const res = await api('/api/teams/create', { method: 'POST', body: JSON.stringify({ name }) });
         await loadState();
-        showToast('Team created! Share your team code with your teammates.');
+        showToast(`Team created! Your code: ${res.code} — share it with your teammates.`);
       } catch(err){
         showToast(err.message, true);
       }
@@ -944,9 +1003,10 @@
 
   async function setMatchFormat(format){
     try {
-      await api('/api/owner/set-match-format', { method: 'POST', body: JSON.stringify({ format }) });
+      const res = await api('/api/owner/set-match-format', { method: 'POST', body: JSON.stringify({ format }) });
       await loadState();
-      showToast(format === 1 ? 'Format set to 1v1' : `Format set to ${format}v${format}`);
+      const label = format === 1 ? '1v1' : `${format}v${format}`;
+      showToast(res.reset ? `Format set to ${label} — previous registrations were cleared` : `Format set to ${label}`);
     } catch(err){
       showToast(err.message, true);
     }
@@ -960,7 +1020,7 @@
     try {
       await api('/api/owner/start-registration', { method: 'POST' });
       await loadState();
-      showToast('Registration is now open!');
+      showToast('Registration is open!');
     } catch(err){
       showToast(err.message, true);
     }
@@ -990,7 +1050,7 @@
   };
 
   el('resetAllBtn').onclick = async () => {
-    if(!confirm('This removes ALL players and the bracket. Continue?')) return;
+    if(!confirm('This removes ALL players and the bracket, and locks registrations again. Continue?')) return;
     try {
       await api('/api/owner/reset-all', { method: 'POST' });
       await loadState();
